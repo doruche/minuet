@@ -24,11 +24,13 @@ pub struct ContinuationItem {
 }
 
 impl ContinuationItem {
-    pub(crate) fn new(value: Value) -> Self {
+    /// Creates an intentionally opaque protocol item. Backend adapters use this
+    /// at their boundary; kernel and session code must only retain and replay it.
+    pub fn from_protocol_value(value: Value) -> Self {
         Self { value }
     }
 
-    pub(crate) fn value(&self) -> &Value {
+    pub fn protocol_value(&self) -> &Value {
         &self.value
     }
 }
@@ -47,7 +49,9 @@ pub struct ModelOutputItem {
 }
 
 impl ModelOutputItem {
-    pub(crate) fn new(continuation: ContinuationItem, effect: OutputEffect) -> Self {
+    /// Couples an immutable protocol item with the one behavioral projection
+    /// which a backend permits the loop to observe.
+    pub fn new(continuation: ContinuationItem, effect: OutputEffect) -> Self {
         Self {
             continuation,
             effect,

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::{
+    context::ContextStrategy,
     inference::{
         ConversationItem, InferenceBackend, InferenceError, InferenceRequest, OutputEffect,
         TokenUsage, ToolCall,
@@ -13,11 +14,7 @@ use crate::{
 
 #[async_trait]
 pub trait AgentLoop: Send + Sync {
-    async fn run(
-        &self,
-        context: &mut LoopContext<'_>,
-        prompt: String,
-    ) -> Result<RunOutcome, LoopError>;
+    async fn run(&self, context: &mut LoopContext<'_>) -> Result<RunOutcome, LoopError>;
 }
 
 pub struct ReactLoop {
@@ -35,24 +32,12 @@ impl ReactLoop {
 
 #[async_trait]
 impl AgentLoop for ReactLoop {
-    async fn run(
-        &self,
-        context: &mut LoopContext<'_>,
-        prompt: String,
-    ) -> Result<RunOutcome, LoopError> {
-        let PreparedRun {
-            mut input,
-            reasoning_effort,
-            definitions,
-        } = context.prepare(prompt)?;
+    async fn run(&self, context: &mut LoopContext<'_>) -> Result<RunOutcome, LoopError> {
         let mut activities = Vec::new();
         let mut run_usage = UsageSummary::default();
 
         for model_turn in 1..=self.max_steps {
-            let turn = context
-                .infer_and_commit(&input, &definitions, reasoning_effort.as_ref())
-                .await?;
-            input.extend(turn.output_items);
+            let turn = context.infer_and_commit().await?;
             run_usage.observe(turn.usage);
 
             if turn.tool_calls.is_empty() {
@@ -68,7 +53,6 @@ impl AgentLoop for ReactLoop {
             }
 
             let tool_round = context.invoke_and_commit(turn.tool_calls).await?;
-            input.extend(tool_round.results);
             activities.extend(tool_round.activities);
         }
 
@@ -81,60 +65,68 @@ impl AgentLoop for ReactLoop {
 /// control of when inference and tool rounds occur.
 pub struct LoopContext<'a> {
     backend: &'a dyn InferenceBackend,
+    context: &'a dyn ContextStrategy,
     store: &'a mut dyn SessionStore,
     tools: &'a ToolRegistry,
     session_id: SessionId,
     model: &'a str,
+    // This is a derived, run-scoped view of store-owned history. LoopContext is
+    // its only mutator and refreshes it immediately after every store commit;
+    // loop policy cannot access it directly or bypass ContextStrategy.
+    input: Vec<ConversationItem>,
+    // These immutable run snapshots come from the session and tool registry.
+    // Kernel command serialization prevents either owner changing them until
+    // the run completes; a later run always takes fresh snapshots.
+    reasoning_effort: Option<ReasoningEffort>,
+    definitions: Vec<ToolDefinition>,
 }
 
 impl<'a> LoopContext<'a> {
     pub(crate) fn new(
         backend: &'a dyn InferenceBackend,
+        context: &'a dyn ContextStrategy,
         store: &'a mut dyn SessionStore,
         tools: &'a ToolRegistry,
         session_id: SessionId,
         model: &'a str,
-    ) -> Self {
-        Self {
-            backend,
-            store,
-            tools,
-            session_id,
-            model,
-        }
-    }
-
-    fn prepare(&mut self, prompt: String) -> Result<PreparedRun, LoopError> {
+        prompt: String,
+    ) -> Result<Self, LoopError> {
         if prompt.trim().is_empty() {
             return Err(LoopError::EmptyPrompt);
         }
 
-        let snapshot = self.store.snapshot(self.session_id)?;
+        let snapshot = store.snapshot(session_id)?;
         let user_item = ConversationItem::UserText(prompt);
-        self.store
-            .append(self.session_id, std::slice::from_ref(&user_item))?;
+        // Locally accepting user input commits it before network work. A failed
+        // upstream call therefore leaves an observable unanswered user turn
+        // instead of silently discarding input or guessing whether it ran.
+        store.append(session_id, std::slice::from_ref(&user_item))?;
         let mut input = snapshot.items;
         input.push(user_item);
-        Ok(PreparedRun {
+        let definitions = tools.definitions();
+
+        Ok(Self {
+            backend,
+            context,
+            store,
+            tools,
+            session_id,
+            model,
             input,
             reasoning_effort: snapshot.reasoning_effort,
-            definitions: self.tools.definitions(),
+            definitions,
         })
     }
 
-    async fn infer_and_commit(
-        &mut self,
-        input: &[ConversationItem],
-        definitions: &[ToolDefinition],
-        reasoning_effort: Option<&ReasoningEffort>,
-    ) -> Result<CommittedModelTurn, LoopError> {
+    pub async fn infer_and_commit(&mut self) -> Result<CommittedModelTurn, LoopError> {
+        let prepared_input = self.context.prepare(&self.input);
         let response = self
             .backend
             .respond(InferenceRequest {
                 model: self.model,
-                input,
-                tools: definitions,
-                reasoning_effort,
+                input: &prepared_input,
+                tools: &self.definitions,
+                reasoning_effort: self.reasoning_effort.as_ref(),
             })
             .await?;
 
@@ -155,15 +147,15 @@ impl<'a> LoopContext<'a> {
         // remains in history even if a later tool round or request fails.
         self.store
             .commit_inference(self.session_id, &output_items, usage)?;
+        self.input.extend(output_items);
         Ok(CommittedModelTurn {
-            output_items,
             tool_calls,
             text,
             usage,
         })
     }
 
-    async fn invoke_and_commit(
+    pub async fn invoke_and_commit(
         &mut self,
         tool_calls: Vec<ToolCall>,
     ) -> Result<CommittedToolRound, LoopError> {
@@ -182,29 +174,19 @@ impl<'a> LoopContext<'a> {
             });
         }
         self.store.append(self.session_id, &results)?;
-        Ok(CommittedToolRound {
-            results,
-            activities,
-        })
+        self.input.extend(results);
+        Ok(CommittedToolRound { activities })
     }
 }
 
-struct PreparedRun {
-    input: Vec<ConversationItem>,
-    reasoning_effort: Option<ReasoningEffort>,
-    definitions: Vec<ToolDefinition>,
+pub struct CommittedModelTurn {
+    pub tool_calls: Vec<ToolCall>,
+    pub text: String,
+    pub usage: Option<TokenUsage>,
 }
 
-struct CommittedModelTurn {
-    output_items: Vec<ConversationItem>,
-    tool_calls: Vec<ToolCall>,
-    text: String,
-    usage: Option<TokenUsage>,
-}
-
-struct CommittedToolRound {
-    results: Vec<ConversationItem>,
-    activities: Vec<ToolActivity>,
+pub struct CommittedToolRound {
+    pub activities: Vec<ToolActivity>,
 }
 
 #[derive(Clone, Debug)]

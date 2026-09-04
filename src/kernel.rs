@@ -8,6 +8,7 @@ use tokio::{
 
 use crate::{
     agent_loop::{AgentLoop, LoopContext, LoopError, RunOutcome},
+    context::ContextStrategy,
     inference::{InferenceBackend, InferenceRequest},
     model::{IdentifierError, ModelSelection, ReasoningEffort},
     session::{SessionId, SessionStore, SessionStoreError, UsageSummary},
@@ -21,23 +22,31 @@ pub struct KernelOptions {
     pub default_reasoning_effort: Option<ReasoningEffort>,
 }
 
+pub struct KernelComponents {
+    pub backend: Arc<dyn InferenceBackend>,
+    pub store: Box<dyn SessionStore>,
+    pub tools: ToolRegistry,
+    pub agent_loop: Arc<dyn AgentLoop>,
+    pub context: Arc<dyn ContextStrategy>,
+}
+
 /// Starts the micro-kernel task. The task is the sole transition owner for the
 /// active session and tool registry; handles can request transitions but never
 /// receive the underlying store or registry.
 pub fn start(
-    backend: Arc<dyn InferenceBackend>,
-    mut store: Box<dyn SessionStore>,
-    tools: ToolRegistry,
-    agent_loop: Arc<dyn AgentLoop>,
+    mut components: KernelComponents,
     options: KernelOptions,
 ) -> Result<RunningKernel, KernelError> {
-    let active_session = store.create(options.default_reasoning_effort.clone())?;
+    let active_session = components
+        .store
+        .create(options.default_reasoning_effort.clone())?;
     let (sender, receiver) = mpsc::channel(COMMAND_BUFFER);
     let task = KernelTask {
-        backend,
-        store,
-        tools,
-        agent_loop,
+        backend: components.backend,
+        store: components.store,
+        tools: components.tools,
+        agent_loop: components.agent_loop,
+        context: components.context,
         model: options.model,
         default_reasoning_effort: options.default_reasoning_effort,
         active_session,
@@ -140,6 +149,7 @@ struct KernelTask {
     store: Box<dyn SessionStore>,
     tools: ToolRegistry,
     agent_loop: Arc<dyn AgentLoop>,
+    context: Arc<dyn ContextStrategy>,
     model: ModelSelection,
     default_reasoning_effort: Option<ReasoningEffort>,
     active_session: SessionId,
@@ -210,9 +220,10 @@ impl KernelTask {
     async fn context_info(&mut self) -> Result<ContextInfo, KernelError> {
         let snapshot = self.store.snapshot(self.active_session)?;
         let definitions = self.tools.definitions();
+        let prepared_input = self.context.prepare(&snapshot.items);
         let request = InferenceRequest {
             model: self.model.model.as_str(),
-            input: &snapshot.items,
+            input: &prepared_input,
             tools: &definitions,
             reasoning_effort: snapshot.reasoning_effort.as_ref(),
         };
@@ -231,15 +242,14 @@ impl KernelTask {
         let agent_loop = Arc::clone(&self.agent_loop);
         let mut context = LoopContext::new(
             self.backend.as_ref(),
+            self.context.as_ref(),
             self.store.as_mut(),
             &self.tools,
             self.active_session,
             self.model.model.as_str(),
-        );
-        agent_loop
-            .run(&mut context, prompt)
-            .await
-            .map_err(Into::into)
+            prompt,
+        )?;
+        agent_loop.run(&mut context).await.map_err(Into::into)
     }
 }
 
@@ -322,6 +332,7 @@ mod tests {
     use super::*;
     use crate::{
         agent_loop::ReactLoop,
+        context::FullContext,
         inference::{
             ContinuationItem, ConversationItem, InferenceError, InferenceResponse, ModelOutputItem,
             OutputEffect, TokenUsage, ToolCall,
@@ -363,7 +374,7 @@ mod tests {
 
     fn output(effect: OutputEffect) -> ModelOutputItem {
         ModelOutputItem::new(
-            ContinuationItem::new(json!({"type":"test-continuation"})),
+            ContinuationItem::from_protocol_value(json!({"type":"test-continuation"})),
             effect,
         )
     }
@@ -407,10 +418,13 @@ mod tests {
             input_tokens: 123,
         });
         let running = start(
-            backend.clone(),
-            Box::new(MemorySessionStore::default()),
-            ToolRegistry::with_builtins(&["echo".to_owned()]).unwrap(),
-            Arc::new(ReactLoop::new(4).unwrap()),
+            KernelComponents {
+                backend: backend.clone(),
+                store: Box::new(MemorySessionStore::default()),
+                tools: ToolRegistry::with_builtins(&["echo".to_owned()]).unwrap(),
+                agent_loop: Arc::new(ReactLoop::new(4).unwrap()),
+                context: Arc::new(FullContext),
+            },
             options(),
         )
         .unwrap();
@@ -449,10 +463,13 @@ mod tests {
             input_tokens: 0,
         });
         let running = start(
-            backend,
-            Box::new(MemorySessionStore::default()),
-            ToolRegistry::with_builtins(&[]).unwrap(),
-            Arc::new(ReactLoop::new(1).unwrap()),
+            KernelComponents {
+                backend,
+                store: Box::new(MemorySessionStore::default()),
+                tools: ToolRegistry::with_builtins(&[]).unwrap(),
+                agent_loop: Arc::new(ReactLoop::new(1).unwrap()),
+                context: Arc::new(FullContext),
+            },
             options(),
         )
         .unwrap();
@@ -487,10 +504,13 @@ mod tests {
             input_tokens: 0,
         });
         let running = start(
-            backend,
-            Box::new(MemorySessionStore::default()),
-            ToolRegistry::with_builtins(&["echo".to_owned()]).unwrap(),
-            Arc::new(ReactLoop::new(1).unwrap()),
+            KernelComponents {
+                backend,
+                store: Box::new(MemorySessionStore::default()),
+                tools: ToolRegistry::with_builtins(&["echo".to_owned()]).unwrap(),
+                agent_loop: Arc::new(ReactLoop::new(1).unwrap()),
+                context: Arc::new(FullContext),
+            },
             options(),
         )
         .unwrap();

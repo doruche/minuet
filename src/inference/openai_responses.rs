@@ -28,6 +28,9 @@ impl OpenAiResponsesBackend {
     }
 
     pub fn new(base_url: &str, api_key: &str) -> Result<Self, OpenAiResponsesBackendError> {
+        if api_key.is_empty() {
+            return Err(OpenAiResponsesBackendError::EmptyApiKey);
+        }
         let base_url = base_url.trim_end_matches('/');
         let responses_url = Url::parse(&format!("{base_url}/responses"))?;
         let input_tokens_url = Url::parse(&format!("{base_url}/responses/input_tokens"))?;
@@ -78,7 +81,7 @@ impl InferenceBackend for OpenAiResponsesBackend {
         &self,
         request: InferenceRequest<'_>,
     ) -> Result<InferenceResponse, InferenceError> {
-        let body = create_request(&request, true)?;
+        let body = create_request(&request, true);
         let response = self.post(self.responses_url.clone(), &body).await?;
         parse_response(response).map_err(Into::into)
     }
@@ -87,7 +90,7 @@ impl InferenceBackend for OpenAiResponsesBackend {
         &self,
         request: InferenceRequest<'_>,
     ) -> Result<u64, InferenceError> {
-        let body = create_request(&request, false)?;
+        let body = create_request(&request, false);
         let response = self.post(self.input_tokens_url.clone(), &body).await?;
         response
             .get("input_tokens")
@@ -97,10 +100,7 @@ impl InferenceBackend for OpenAiResponsesBackend {
     }
 }
 
-fn create_request(
-    request: &InferenceRequest<'_>,
-    generation: bool,
-) -> Result<Value, OpenAiResponsesBackendError> {
+fn create_request(request: &InferenceRequest<'_>, generation: bool) -> Value {
     let input = request
         .input
         .iter()
@@ -119,6 +119,10 @@ fn create_request(
     if generation {
         body.insert("stream".to_owned(), Value::Bool(false));
         body.insert("store".to_owned(), Value::Bool(false));
+        // Stateless OpenAI reasoning turns need this opaque continuation data.
+        // Compatible providers may omit it from their response, in which case
+        // their returned reasoning item is still replayed unchanged.
+        body.insert("include".to_owned(), json!(["reasoning.encrypted_content"]));
         // Full context is locally managed. Disabling server truncation keeps an
         // overflow observable instead of silently changing the conversation.
         body.insert(
@@ -126,7 +130,7 @@ fn create_request(
             Value::String("disabled".to_owned()),
         );
     }
-    Ok(Value::Object(body))
+    Value::Object(body)
 }
 
 fn encode_input_item(item: &ConversationItem) -> Value {
@@ -136,7 +140,7 @@ fn encode_input_item(item: &ConversationItem) -> Value {
             "role": "user",
             "content": [{ "type": "input_text", "text": text }]
         }),
-        ConversationItem::Continuation(item) => item.value().clone(),
+        ConversationItem::Continuation(item) => item.protocol_value().clone(),
         ConversationItem::FunctionCallOutput { call_id, output } => json!({
             "type": "function_call_output",
             "call_id": call_id,
@@ -169,7 +173,11 @@ fn parse_response(value: Value) -> Result<InferenceResponse, OpenAiResponsesBack
         .cloned()
         .map(parse_output_item)
         .collect::<Result<Vec<_>, _>>()?;
-    let usage = value.get("usage").map(parse_usage).transpose()?;
+    let usage = value
+        .get("usage")
+        .filter(|usage| !usage.is_null())
+        .map(parse_usage)
+        .transpose()?;
 
     Ok(InferenceResponse { output, usage })
 }
@@ -205,7 +213,10 @@ fn parse_output_item(value: Value) -> Result<ModelOutputItem, OpenAiResponsesBac
         _ => OutputEffect::None,
     };
 
-    Ok(ModelOutputItem::new(ContinuationItem::new(value), effect))
+    Ok(ModelOutputItem::new(
+        ContinuationItem::from_protocol_value(value),
+        effect,
+    ))
 }
 
 fn parse_usage(value: &Value) -> Result<TokenUsage, OpenAiResponsesBackendError> {
@@ -252,6 +263,8 @@ fn lossy_body(bytes: &[u8]) -> String {
 pub enum OpenAiResponsesBackendError {
     #[error("API key environment variable `{0}` is not set")]
     ApiKeyNotSet(String),
+    #[error("API key must not be empty")]
+    EmptyApiKey,
     #[error("invalid provider base URL: {0}")]
     InvalidUrl(#[from] url::ParseError),
     #[error("invalid authorization header: {0}")]
@@ -286,6 +299,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_empty_api_keys_before_building_a_client() {
+        assert!(matches!(
+            OpenAiResponsesBackend::new("https://example.test/v1", ""),
+            Err(OpenAiResponsesBackendError::EmptyApiKey)
+        ));
+    }
+
+    #[test]
     fn generation_request_is_stateless_and_non_streaming() {
         let items = [ConversationItem::UserText("hello".to_owned())];
         let tools = [definition()];
@@ -297,10 +318,11 @@ mod tests {
             reasoning_effort: Some(&effort),
         };
 
-        let body = create_request(&request, true).unwrap();
+        let body = create_request(&request, true);
         assert_eq!(body["stream"], false);
         assert_eq!(body["store"], false);
         assert_eq!(body["truncation"], "disabled");
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["reasoning"]["effort"], "vendor-special");
         assert!(body.get("instructions").is_none());
     }
@@ -315,10 +337,11 @@ mod tests {
             reasoning_effort: None,
         };
 
-        let body = create_request(&request, false).unwrap();
+        let body = create_request(&request, false);
         assert!(body.get("stream").is_none());
         assert!(body.get("store").is_none());
         assert!(body.get("truncation").is_none());
+        assert!(body.get("include").is_none());
         assert!(body.get("reasoning").is_none());
     }
 
@@ -347,9 +370,9 @@ mod tests {
     #[test]
     fn replays_continuations_without_interpreting_them() {
         let raw = json!({"type":"reasoning","id":"opaque","vendor_field":17});
-        let items = [ConversationItem::Continuation(ContinuationItem::new(
-            raw.clone(),
-        ))];
+        let items = [ConversationItem::Continuation(
+            ContinuationItem::from_protocol_value(raw.clone()),
+        )];
         let request = InferenceRequest {
             model: "model",
             input: &items,
@@ -357,7 +380,18 @@ mod tests {
             reasoning_effort: None,
         };
 
-        let body = create_request(&request, true).unwrap();
+        let body = create_request(&request, true);
         assert_eq!(body["input"][0], raw);
+    }
+
+    #[test]
+    fn treats_explicitly_null_usage_as_unreported() {
+        let response = json!({
+            "status": "completed",
+            "output": [{"type":"message","content":[]}],
+            "usage": null
+        });
+
+        assert_eq!(parse_response(response).unwrap().usage, None);
     }
 }

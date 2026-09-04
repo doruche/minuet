@@ -143,3 +143,117 @@ error, cancellation, timeout, and teardown paths.
 Withdraw publication, unregister callbacks, or release external visibility
 before performing diagnostic checks that could abort cleanup. Do not turn an
 impossible internal state into success merely to make teardown appear robust.
+
+## Architecture Friction Closeout
+
+### Applicability
+
+Apply this rule to meaningful changes that can alter state ownership, subsystem
+boundaries, public interfaces, compatibility behavior, concurrency, or resource
+lifecycle. Do not impose a formal architecture report on trivial or purely
+mechanical edits.
+
+### Closeout requirement
+
+Before declaring a meaningful change complete, inspect the actual diff and the
+directly affected paths for architecture friction. The purpose is to catch
+evidence that implementation pressure has distorted the intended model, not to
+perform an unbounded repository audit.
+
+Check for:
+
+- a second source of truth, writable derived state, or an unexplained stale
+  mirror;
+- state or protocol decisions made outside their owner;
+- private representation, locks, storage, or concrete implementation types
+  leaking across a boundary;
+- public API or visibility growth introduced only to satisfy a local caller;
+- caller-, platform-, environment-, architecture-, or test-specific branches
+  substituting for a real domain rule;
+- a temporary bridge, fallback, dual path, or dormant production path without
+  an exit condition;
+- failure, cancellation, rollback, publication, or cleanup correctness that
+  depends on an implicit order;
+- a new wrapper, phase, token, manager, registry, or framework without a
+  concrete obligation;
+- a workaround that obtains a passing result by weakening the oracle,
+  validation scope, compatibility honesty, or visible error behavior;
+- a module whose new responsibility no longer fits its existing owner or
+  lifecycle.
+
+For cross-boundary changes, ask four closing questions:
+
+1. Who owns every changed behavioral fact?
+2. Where does ownership or authority hand off?
+3. Who owns failure and final cleanup after each possible partial result?
+4. What evidence proves the externally claimed scope rather than only the
+   happy path?
+
+### Evidence threshold
+
+Architecture friction requires concrete evidence from at least one of:
+
+- a live code path or actual diff;
+- a conflicting state or truth-source model;
+- an owner, handoff, lifecycle, or cleanup gap;
+- a leaked interface or representation;
+- a current or explicitly accepted next step that the present shape blocks;
+- validation that no longer proves the stated behavior.
+
+The following do not constitute friction by themselves:
+
+- file length;
+- ordinary imports, re-exports, or module registration;
+- compiler, formatter, toolchain, or environment failures;
+- general dislike of the style;
+- speculative future extensibility concerns;
+- adjacent technical debt that this change neither worsens nor exposes as a
+  dependency.
+
+Do not invent findings to fill a closeout section.
+
+### Disposition
+
+Use these levels when friction is found:
+
+- **Apollyon — blocking correctness:** wrong results, corruption, security
+  failure, crashes, or severe unrecoverable state. Stop; do not declare
+  completion or perform a semantic cutover.
+- **Keter — blocking architecture:** concrete owner confusion, duplicated
+  authority, leaked private representation, unauditable lifecycle or protocol,
+  or obstruction of a named current or accepted next step. Stop; repair it or
+  obtain the required owner, target, or contract decision.
+- **Euclid — non-blocking engineering debt:** concrete but locally survivable
+  model mismatch, coupling, awkward structure, or test friction. The change may
+  close, but report the evidence, impact, and smallest repair direction if it
+  remains.
+- **Safe — optional:** preference, theoretical purity, or speculative concern.
+  Do not report it by default.
+
+Do not promote a concern to Keter merely because a cleaner design is
+imaginable. A blocking architecture finding needs evidence that the current
+shape already violates or obstructs a real obligation.
+
+### Reporting
+
+If no concrete friction remains, or only Safe observations remain, emit no
+placeholder “no friction” report.
+
+For residual Euclid, report briefly:
+
+- the affected code path;
+- the intended owner, state, protocol, or lifecycle model;
+- the model the implementation currently expresses;
+- current impact;
+- the smallest credible repair boundary.
+
+For Keter or Apollyon, stop before the completion claim or cutover and report:
+
+- the blocking evidence;
+- the current state of the diff or partial implementation;
+- what can safely remain;
+- the explicit owner, target, interface, contract, or acceptance decision
+  needed to proceed.
+
+The scan does not authorize unrelated cleanup. If the repair lies outside the
+current task boundary, report it instead of silently expanding scope.

@@ -5,8 +5,9 @@ Minuet is a general-purpose CLI agent harness.
 The current implementation is an early, single-crate micro-kernel with a
 non-streaming OpenAI-compatible Responses backend, an in-memory session store,
 a replaceable ReAct loop, and runtime-toggleable function tools. See
-[`docs/architecture.md`](docs/architecture.md) for its boundaries and deliberate
-initial limits.
+[`docs/architecture.md`](docs/architecture.md) for its ownership model and
+[`docs/current-limitations.md`](docs/current-limitations.md) for current runtime
+and product limits.
 
 ## Running
 

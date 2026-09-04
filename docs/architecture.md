@@ -47,14 +47,8 @@ the committed history and currently enabled tools. Separately, the session sums
 only usage actually returned by inference responses and marks the sum partial if
 any successful call omitted usage. Minuet does not store a context-window size.
 
-## Initial limits
+## Current limits
 
-- Only the non-streaming OpenAI-compatible Responses protocol is implemented.
-- API built-in tools and system instructions are not exposed.
-- Tool calls execute sequentially, and ReAct stops after the configured maximum
-  number of model turns. Tool argument/execution errors are returned to the
-  model as function outputs.
-- Sessions, effort changes, and tool toggles exist only in memory and disappear
-  when the process exits. `config.toml` is read-only at runtime.
-- There is no policy engine, subagent support, GUI, or third-party component
-  loading.
+The user-visible and operational limits of this implementation are maintained
+in [`current-limitations.md`](current-limitations.md). Keeping that list in one
+place avoids treating a transient module shape as a product guarantee.

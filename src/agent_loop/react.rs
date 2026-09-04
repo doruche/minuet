@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use super::{AgentLoop, LoopContext, LoopError, RunOutcome, UsageSummary};
+use super::{AgentLoop, LoopContext, LoopError, RunOutcome, RunStopReason, UsageSummary};
 
 pub struct ReactLoop {
     max_steps: usize,
@@ -31,10 +31,19 @@ impl AgentLoop for ReactLoop {
                     model_turns: model_turn,
                     tool_activity: activities,
                     usage: run_usage,
+                    stop_reason: RunStopReason::Completed,
                 });
             }
             if model_turn == self.max_steps {
-                return Err(LoopError::StepLimit(self.max_steps));
+                let skipped = context.skip_and_commit(turn.tool_calls)?;
+                activities.extend(skipped.activities);
+                return Ok(RunOutcome {
+                    text: turn.text,
+                    model_turns: model_turn,
+                    tool_activity: activities,
+                    usage: run_usage,
+                    stop_reason: RunStopReason::StepLimit,
+                });
             }
 
             let tool_round = context.invoke_and_commit(turn.tool_calls).await?;

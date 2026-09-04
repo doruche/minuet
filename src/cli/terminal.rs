@@ -1,6 +1,10 @@
 use std::io::{self, Write};
 
-use minuet::{agent_loop::RunOutcome, kernel::KernelHandle, session::UsageSummary};
+use minuet::{
+    agent_loop::{RunOutcome, RunStopReason, ToolActivityStatus},
+    kernel::KernelHandle,
+    session::UsageSummary,
+};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use super::{command, handler};
@@ -108,13 +112,20 @@ fn print_usage(usage: &UsageSummary) {
 
 fn print_outcome(outcome: &RunOutcome) {
     for activity in &outcome.tool_activity {
-        let state = if activity.is_error { "error" } else { "ok" };
+        let state = match activity.status {
+            ToolActivityStatus::Completed => "ok",
+            ToolActivityStatus::Error => "error",
+            ToolActivityStatus::Skipped => "skipped",
+        };
         println!("[tool {}: {state}] {}", activity.name, activity.output);
     }
     if outcome.text.is_empty() {
         println!("(no text output)");
     } else {
         println!("{}", outcome.text);
+    }
+    if outcome.stop_reason == RunStopReason::StepLimit {
+        println!("run stopped: model-turn limit reached; pending tool calls were not executed");
     }
 }
 

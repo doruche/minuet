@@ -374,7 +374,7 @@ mod tests {
 
     fn output(effect: OutputEffect) -> ModelOutputItem {
         ModelOutputItem::new(
-            ContinuationItem::from_protocol_value(json!({"type":"test-continuation"})),
+            ContinuationItem::for_test(json!({"type":"test-continuation"})),
             effect,
         )
     }
@@ -516,11 +516,80 @@ mod tests {
         .unwrap();
         let handle = running.handle();
 
-        let error = handle.run("loop forever").await.unwrap_err();
-        assert!(matches!(
-            error,
-            KernelError::AgentLoop(LoopError::StepLimit(1))
-        ));
+        let outcome = handle.run("loop forever").await.unwrap();
+        assert_eq!(
+            outcome.stop_reason,
+            crate::agent_loop::RunStopReason::StepLimit
+        );
+        assert_eq!(outcome.tool_activity.len(), 1);
+        assert_eq!(
+            outcome.tool_activity[0].status,
+            crate::agent_loop::ToolActivityStatus::Skipped
+        );
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_limited_run_closes_tool_calls_for_the_next_session_turn() {
+        let backend = Arc::new(ScriptedBackend {
+            responses: Mutex::new(VecDeque::from([
+                InferenceResponse {
+                    output: vec![output(OutputEffect::ToolCall(ToolCall {
+                        call_id: "call-limited".to_owned(),
+                        name: "echo".to_owned(),
+                        arguments: r#"{"text":"must-not-run"}"#.to_owned(),
+                    }))],
+                    usage: Some(usage(1, 1)),
+                },
+                InferenceResponse {
+                    output: vec![output(OutputEffect::Text("continued".to_owned()))],
+                    usage: Some(usage(2, 1)),
+                },
+            ])),
+            seen_inputs: Mutex::new(Vec::new()),
+            input_tokens: 0,
+        });
+        let running = start(
+            KernelComponents {
+                backend: backend.clone(),
+                store: Box::new(MemorySessionStore::default()),
+                tools: ToolRegistry::with_builtins(&["echo".to_owned()]).unwrap(),
+                agent_loop: Arc::new(ReactLoop::new(1).unwrap()),
+                context: Arc::new(FullContext),
+            },
+            options(),
+        )
+        .unwrap();
+        let handle = running.handle();
+
+        let limited = handle.run("use echo").await.unwrap();
+        assert_eq!(
+            limited.stop_reason,
+            crate::agent_loop::RunStopReason::StepLimit
+        );
+        assert_eq!(
+            limited.tool_activity[0].status,
+            crate::agent_loop::ToolActivityStatus::Skipped
+        );
+
+        let continued = handle.run("continue").await.unwrap();
+        assert_eq!(
+            continued.stop_reason,
+            crate::agent_loop::RunStopReason::Completed
+        );
+        assert_eq!(continued.text, "continued");
+
+        {
+            let seen = backend.seen_inputs.lock().unwrap();
+            assert_eq!(seen.len(), 2);
+            assert!(seen[1].iter().any(|item| {
+                matches!(
+                    item,
+                    ConversationItem::FunctionCallOutput { call_id, output }
+                        if call_id == "call-limited" && output.contains("step_limit")
+                )
+            }));
+        }
         running.shutdown().await.unwrap();
     }
 }

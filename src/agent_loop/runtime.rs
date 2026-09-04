@@ -7,6 +7,10 @@ use crate::{
 };
 
 use super::{CommittedModelTurn, CommittedToolRound, LoopError, ToolActivity};
+use super::{PendingToolRound, ToolActivityStatus};
+
+const STEP_LIMIT_OUTPUT: &str =
+    "tool call was not executed because the run reached its model-turn limit";
 
 /// A narrow mechanism capability provided to a loop component. It preserves
 /// session commit ordering and tool visibility while leaving the loop in
@@ -97,13 +101,48 @@ impl<'a> LoopContext<'a> {
             .commit_inference(self.session_id, &output_items, usage)?;
         self.input.extend(output_items);
         Ok(CommittedModelTurn {
-            tool_calls,
+            tool_calls: PendingToolRound { calls: tool_calls },
             text,
             usage,
         })
     }
 
     pub async fn invoke_and_commit(
+        &mut self,
+        pending: PendingToolRound,
+    ) -> Result<CommittedToolRound, LoopError> {
+        self.commit_tool_calls(pending.calls).await
+    }
+
+    pub fn skip_and_commit(
+        &mut self,
+        pending: PendingToolRound,
+    ) -> Result<CommittedToolRound, LoopError> {
+        let mut results = Vec::with_capacity(pending.calls.len());
+        let mut activities = Vec::with_capacity(pending.calls.len());
+        for call in pending.calls {
+            results.push(ConversationItem::FunctionCallOutput {
+                call_id: call.call_id,
+                output: serde_json::json!({
+                    "error": {
+                        "kind": "step_limit",
+                        "message": STEP_LIMIT_OUTPUT
+                    }
+                })
+                .to_string(),
+            });
+            activities.push(ToolActivity {
+                name: call.name,
+                output: STEP_LIMIT_OUTPUT.to_owned(),
+                status: ToolActivityStatus::Skipped,
+            });
+        }
+        self.store.append(self.session_id, &results)?;
+        self.input.extend(results);
+        Ok(CommittedToolRound { activities })
+    }
+
+    async fn commit_tool_calls(
         &mut self,
         tool_calls: Vec<ToolCall>,
     ) -> Result<CommittedToolRound, LoopError> {
@@ -118,7 +157,11 @@ impl<'a> LoopContext<'a> {
             activities.push(ToolActivity {
                 name: call.name,
                 output: invocation.output,
-                is_error: invocation.is_error,
+                status: if invocation.is_error {
+                    ToolActivityStatus::Error
+                } else {
+                    ToolActivityStatus::Completed
+                },
             });
         }
         self.store.append(self.session_id, &results)?;

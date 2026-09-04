@@ -26,12 +26,17 @@ pub struct ContinuationItem {
 impl ContinuationItem {
     /// Creates an intentionally opaque protocol item. Backend adapters use this
     /// at their boundary; kernel and session code must only retain and replay it.
-    pub fn from_protocol_value(value: Value) -> Self {
+    fn from_protocol_value(value: Value) -> Self {
         Self { value }
     }
 
-    pub fn protocol_value(&self) -> &Value {
+    fn protocol_value(&self) -> &Value {
         &self.value
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(value: Value) -> Self {
+        Self::from_protocol_value(value)
     }
 }
 

@@ -1,19 +1,14 @@
 use crate::inference::ConversationItem;
 
+mod full;
+
+pub use full::FullContext;
+
 /// Selects the model-visible view of canonical session history. A strategy
 /// returns an owned snapshot; it never mutates or becomes a second owner of the
 /// committed conversation.
 pub trait ContextStrategy: Send + Sync {
     fn prepare(&self, committed: &[ConversationItem]) -> Vec<ConversationItem>;
-}
-
-#[derive(Default)]
-pub struct FullContext;
-
-impl ContextStrategy for FullContext {
-    fn prepare(&self, committed: &[ConversationItem]) -> Vec<ConversationItem> {
-        committed.to_vec()
-    }
 }
 
 #[cfg(test)]

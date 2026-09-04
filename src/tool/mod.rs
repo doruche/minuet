@@ -1,11 +1,13 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::{SecondsFormat, Utc};
-use rand::Rng;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
+
+mod builtins;
+mod current_datetime;
+mod echo;
+mod random_integer;
 
 #[derive(Clone, Debug)]
 pub struct ToolDefinition {
@@ -46,14 +48,7 @@ struct RegisteredTool {
 
 impl ToolRegistry {
     pub fn with_builtins(enabled: &[String]) -> Result<Self, ToolRegistryError> {
-        Self::new(
-            [
-                Arc::new(EchoTool) as Arc<dyn Tool>,
-                Arc::new(RandomIntegerTool),
-                Arc::new(CurrentDatetimeTool),
-            ],
-            enabled,
-        )
+        Self::new(builtins::all(), enabled)
     }
 
     pub fn new(
@@ -185,109 +180,6 @@ impl ToolError {
             Self::InvalidArguments(_) => "invalid_arguments",
             Self::Execution(_) => "execution_error",
         }
-    }
-}
-
-struct EchoTool;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EchoArguments {
-    text: String,
-}
-
-#[async_trait]
-impl Tool for EchoTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "echo".to_owned(),
-            description: "Return the provided text unchanged.".to_owned(),
-            parameters: json!({
-                "type": "object",
-                "properties": {"text": {"type": "string"}},
-                "required": ["text"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    async fn invoke(&self, arguments: Value) -> Result<Value, ToolError> {
-        let arguments: EchoArguments = serde_json::from_value(arguments)
-            .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
-        Ok(json!({"text": arguments.text}))
-    }
-}
-
-struct RandomIntegerTool;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RandomIntegerArguments {
-    min: i64,
-    max: i64,
-}
-
-#[async_trait]
-impl Tool for RandomIntegerTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "random_integer".to_owned(),
-            description: "Generate a uniformly distributed integer in an inclusive range."
-                .to_owned(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "min": {"type": "integer"},
-                    "max": {"type": "integer"}
-                },
-                "required": ["min", "max"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    async fn invoke(&self, arguments: Value) -> Result<Value, ToolError> {
-        let arguments: RandomIntegerArguments = serde_json::from_value(arguments)
-            .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
-        if arguments.min > arguments.max {
-            return Err(ToolError::InvalidArguments(
-                "min must be less than or equal to max".to_owned(),
-            ));
-        }
-        let value = rand::rng().random_range(arguments.min..=arguments.max);
-        Ok(json!({"value": value}))
-    }
-}
-
-struct CurrentDatetimeTool;
-
-#[async_trait]
-impl Tool for CurrentDatetimeTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "current_datetime".to_owned(),
-            description: "Return the current UTC date and time in RFC 3339 format.".to_owned(),
-            parameters: json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    async fn invoke(&self, arguments: Value) -> Result<Value, ToolError> {
-        let arguments = arguments
-            .as_object()
-            .ok_or_else(|| ToolError::InvalidArguments("arguments must be an object".to_owned()))?;
-        if !arguments.is_empty() {
-            return Err(ToolError::InvalidArguments(
-                "current_datetime accepts no arguments".to_owned(),
-            ));
-        }
-        Ok(json!({
-            "datetime": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-            "timezone": "UTC"
-        }))
     }
 }
 

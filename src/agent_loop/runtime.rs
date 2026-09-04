@@ -1,64 +1,12 @@
-use async_trait::async_trait;
-use thiserror::Error;
-
 use crate::{
     context::ContextStrategy,
-    inference::{
-        ConversationItem, InferenceBackend, InferenceError, InferenceRequest, OutputEffect,
-        TokenUsage, ToolCall,
-    },
+    inference::{ConversationItem, InferenceBackend, InferenceRequest, OutputEffect, ToolCall},
     model::ReasoningEffort,
-    session::{SessionId, SessionStore, SessionStoreError, UsageSummary},
+    session::{SessionId, SessionStore},
     tool::{ToolDefinition, ToolRegistry},
 };
 
-#[async_trait]
-pub trait AgentLoop: Send + Sync {
-    async fn run(&self, context: &mut LoopContext<'_>) -> Result<RunOutcome, LoopError>;
-}
-
-pub struct ReactLoop {
-    max_steps: usize,
-}
-
-impl ReactLoop {
-    pub fn new(max_steps: usize) -> Result<Self, LoopError> {
-        if max_steps == 0 {
-            return Err(LoopError::InvalidMaxSteps);
-        }
-        Ok(Self { max_steps })
-    }
-}
-
-#[async_trait]
-impl AgentLoop for ReactLoop {
-    async fn run(&self, context: &mut LoopContext<'_>) -> Result<RunOutcome, LoopError> {
-        let mut activities = Vec::new();
-        let mut run_usage = UsageSummary::default();
-
-        for model_turn in 1..=self.max_steps {
-            let turn = context.infer_and_commit().await?;
-            run_usage.observe(turn.usage);
-
-            if turn.tool_calls.is_empty() {
-                return Ok(RunOutcome {
-                    text: turn.text,
-                    model_turns: model_turn,
-                    tool_activity: activities,
-                    usage: run_usage,
-                });
-            }
-            if model_turn == self.max_steps {
-                return Err(LoopError::StepLimit(self.max_steps));
-            }
-
-            let tool_round = context.invoke_and_commit(turn.tool_calls).await?;
-            activities.extend(tool_round.activities);
-        }
-
-        unreachable!("max_steps is non-zero and every loop path returns or continues")
-    }
-}
+use super::{CommittedModelTurn, CommittedToolRound, LoopError, ToolActivity};
 
 /// A narrow mechanism capability provided to a loop component. It preserves
 /// session commit ordering and tool visibility while leaving the loop in
@@ -177,43 +125,4 @@ impl<'a> LoopContext<'a> {
         self.input.extend(results);
         Ok(CommittedToolRound { activities })
     }
-}
-
-pub struct CommittedModelTurn {
-    pub tool_calls: Vec<ToolCall>,
-    pub text: String,
-    pub usage: Option<TokenUsage>,
-}
-
-pub struct CommittedToolRound {
-    pub activities: Vec<ToolActivity>,
-}
-
-#[derive(Clone, Debug)]
-pub struct RunOutcome {
-    pub text: String,
-    pub model_turns: usize,
-    pub tool_activity: Vec<ToolActivity>,
-    pub usage: UsageSummary,
-}
-
-#[derive(Clone, Debug)]
-pub struct ToolActivity {
-    pub name: String,
-    pub output: String,
-    pub is_error: bool,
-}
-
-#[derive(Debug, Error)]
-pub enum LoopError {
-    #[error("prompt must not be empty")]
-    EmptyPrompt,
-    #[error("loop.max_steps must be greater than zero")]
-    InvalidMaxSteps,
-    #[error("ReAct loop reached its limit of {0} model turns")]
-    StepLimit(usize),
-    #[error(transparent)]
-    Inference(#[from] InferenceError),
-    #[error(transparent)]
-    Session(#[from] SessionStoreError),
 }

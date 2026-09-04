@@ -1,0 +1,46 @@
+use async_trait::async_trait;
+
+use super::{AgentLoop, LoopContext, LoopError, RunOutcome, UsageSummary};
+
+pub struct ReactLoop {
+    max_steps: usize,
+}
+
+impl ReactLoop {
+    pub fn new(max_steps: usize) -> Result<Self, LoopError> {
+        if max_steps == 0 {
+            return Err(LoopError::InvalidMaxSteps);
+        }
+        Ok(Self { max_steps })
+    }
+}
+
+#[async_trait]
+impl AgentLoop for ReactLoop {
+    async fn run(&self, context: &mut LoopContext<'_>) -> Result<RunOutcome, LoopError> {
+        let mut activities = Vec::new();
+        let mut run_usage = UsageSummary::default();
+
+        for model_turn in 1..=self.max_steps {
+            let turn = context.infer_and_commit().await?;
+            run_usage.observe(turn.usage);
+
+            if turn.tool_calls.is_empty() {
+                return Ok(RunOutcome {
+                    text: turn.text,
+                    model_turns: model_turn,
+                    tool_activity: activities,
+                    usage: run_usage,
+                });
+            }
+            if model_turn == self.max_steps {
+                return Err(LoopError::StepLimit(self.max_steps));
+            }
+
+            let tool_round = context.invoke_and_commit(turn.tool_calls).await?;
+            activities.extend(tool_round.activities);
+        }
+
+        unreachable!("max_steps is non-zero and every loop path returns or continues")
+    }
+}

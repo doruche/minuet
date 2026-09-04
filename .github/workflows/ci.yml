@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          enable_kvm: false
+
+      - name: Check Nix flake
+        run: nix flake check --all-systems --no-build
+
+      - name: Check formatting
+        run: nix develop --command cargo fmt --check
+
+      - name: Lint
+        run: nix develop --command cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: nix develop --command cargo test --locked --all-targets --all-features

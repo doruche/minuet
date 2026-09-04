@@ -1,4 +1,4 @@
-use std::{env, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::{
@@ -12,7 +12,7 @@ use super::{
     ContinuationItem, ConversationItem, InferenceBackend, InferenceError, InferenceRequest,
     InferenceResponse, ModelOutputItem, OutputEffect, TokenUsage, ToolCall,
 };
-use crate::{config::ProviderConfig, tool::ToolDefinition};
+use crate::tool::ToolDefinition;
 
 pub struct OpenAiResponsesBackend {
     client: Client,
@@ -21,12 +21,6 @@ pub struct OpenAiResponsesBackend {
 }
 
 impl OpenAiResponsesBackend {
-    pub fn from_config(config: &ProviderConfig) -> Result<Self, OpenAiResponsesBackendError> {
-        let api_key = env::var(&config.api_key_env)
-            .map_err(|_| OpenAiResponsesBackendError::ApiKeyNotSet(config.api_key_env.clone()))?;
-        Self::new(&config.base_url, &api_key)
-    }
-
     pub fn new(base_url: &str, api_key: &str) -> Result<Self, OpenAiResponsesBackendError> {
         if api_key.is_empty() {
             return Err(OpenAiResponsesBackendError::EmptyApiKey);
@@ -261,8 +255,6 @@ fn lossy_body(bytes: &[u8]) -> String {
 
 #[derive(Debug, Error)]
 pub enum OpenAiResponsesBackendError {
-    #[error("API key environment variable `{0}` is not set")]
-    ApiKeyNotSet(String),
     #[error("API key must not be empty")]
     EmptyApiKey,
     #[error("invalid provider base URL: {0}")]

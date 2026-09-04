@@ -24,7 +24,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let config = Config::load()?;
     let backend: Arc<dyn InferenceBackend> = match config.provider.protocol {
         Protocol::OpenAiResponses => {
-            Arc::new(OpenAiResponsesBackend::from_config(&config.provider)?)
+            let api_key = config.provider.api_key()?;
+            Arc::new(OpenAiResponsesBackend::new(
+                &config.provider.base_url,
+                &api_key,
+            )?)
         },
     };
     let tools = ToolRegistry::with_builtins(&config.enabled_tools)?;

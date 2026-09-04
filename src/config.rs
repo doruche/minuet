@@ -25,6 +25,12 @@ pub struct ProviderConfig {
     pub api_key_env: String,
 }
 
+impl ProviderConfig {
+    pub fn api_key(&self) -> Result<String, ConfigError> {
+        env::var(&self.api_key_env).map_err(|_| ConfigError::ApiKeyNotSet(self.api_key_env.clone()))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Protocol {
     OpenAiResponses,
@@ -177,6 +183,8 @@ pub enum ConfigError {
     UnsupportedProtocol(String),
     #[error("{0} must not be empty")]
     EmptyField(&'static str),
+    #[error("API key environment variable `{0}` is not set")]
+    ApiKeyNotSet(String),
     #[error("loop.max_steps must be greater than zero")]
     ZeroMaxSteps,
 }

@@ -4,6 +4,8 @@ Minuet is a general-purpose CLI agent harness.
 
 ## Development
 
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for commit and pull request guidance.
+
 [Nix](https://nixos.org/) provides the development shell, while
 [`rust-toolchain.toml`](rust-toolchain.toml) pins the Rust toolchain managed by
 `rustup`.

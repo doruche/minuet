@@ -1,0 +1,16 @@
+model = "MiniMax-M3"
+model_provider = "minimax"
+
+# Optional. Minuet forwards this string without interpreting or validating it.
+model_reasoning_effort = "none"
+
+[loop]
+max_steps = 8
+
+[tools]
+enabled = ["echo", "random_integer", "current_datetime"]
+
+[model_providers.minimax]
+protocol = "openai-responses"
+base_url = "https://api.minimax.cn/v1"
+api_key_env = "MINIMAX_API_KEY"

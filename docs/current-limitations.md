@@ -16,7 +16,8 @@ tool toggles changed during an interactive run are not written back to disk.
 
 ## Inference and context
 
-Minuet currently uses one non-streaming, OpenAI-compatible Responses protocol.
+Minuet currently uses one stream-only, OpenAI-compatible Responses protocol for
+generation. Input-token counting remains a separate JSON operation.
 Provider-specific continuation data is retained and replayed, but no other
 provider protocol is exposed by the application.
 
@@ -68,12 +69,15 @@ requires terminal stdin and stdout; there is no plain-text REPL fallback.
 Tool progress is UTF-8 text, not a terminal emulation protocol. Newlines are
 preserved, tabs are displayed as spaces, and other control characters (including
 ANSI escapes and carriage returns) are displayed literally. Progress is separate
-from the final result; both can contain overlapping content. Model responses
-remain non-streaming.
+from the final result; both can contain overlapping content. Model text is shown
+in a replaceable preview while it is generated and published as complete
+Markdown only after the model turn commits. Failed partial output remains
+visible as an incomplete draft and is not committed.
 
 The TUI parses each completed model answer as one Markdown document so reference
 links can resolve across paragraphs, then formats and publishes one top-level
-block at a time. It does not incrementally parse model tokens. The supported
+block at a time. It does not incrementally parse model tokens as final Markdown;
+the in-progress preview is replaceable and intentionally provisional. The supported
 dialect is CommonMark with tables, task lists and strikethrough; raw HTML stays
 literal and images are text placeholders. Recognized code languages use bundled
 syntax highlighting; absent or unknown language labels use ordinary code text.

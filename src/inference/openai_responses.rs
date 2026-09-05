@@ -105,7 +105,9 @@ impl OpenAiResponsesBackend {
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk?;
             pending.extend_from_slice(&chunk);
-            if pending.len() > MAX_SSE_EVENT_BYTES {
+            if !pending.iter().any(|byte| *byte == b'\n' || *byte == b'\r')
+                && pending.len() > MAX_SSE_EVENT_BYTES
+            {
                 return Err(OpenAiResponsesBackendError::MalformedStream(
                     "SSE event exceeded the size limit",
                 ));

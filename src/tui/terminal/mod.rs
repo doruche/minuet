@@ -19,7 +19,6 @@ use crossterm::{
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
-    text::Text,
     widgets::{Paragraph, Widget},
 };
 
@@ -138,11 +137,14 @@ impl Screen {
     /// incidental punctuation in diagnostics cannot become formatting.
     pub fn markdown(&mut self, markdown: &str) -> io::Result<()> {
         self.end_line()?;
-        let rendered = tui_markdown::from_str(markdown);
+        // Sanitize before parsing so raw control bytes from a model response
+        // cannot reach the terminal backend through Markdown spans.
+        let safe = render::safe_text(markdown);
+        let rendered = tui_markdown::from_str(&safe);
         self.terminal.autoresize()?;
-        let lines = rendered.lines.len().max(1) as u16;
+        let lines = rendered.lines.len().clamp(1, usize::from(u16::MAX)) as u16;
         self.terminal.insert_before(lines, |buffer| {
-            Text::from(rendered.clone()).render(buffer.area, buffer);
+            rendered.clone().render(buffer.area, buffer);
         })?;
         Ok(())
     }

@@ -89,14 +89,16 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
     // it before accepting another request; it never determines run completion.
     let mut events: Option<mpsc::Receiver<RunEvent>> = None;
     let mut last_draw = Instant::now() - Duration::from_millis(100);
-    let mut redraw = tokio::time::interval(Duration::from_millis(100));
+    let mut redraw = tokio::time::interval(Duration::from_millis(40));
     redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
     screen.line("Minuet — /help for commands", Tone::Meta)?;
 
     loop {
-        if request.is_none() || last_draw.elapsed() >= Duration::from_millis(100) {
+        let preview_changed = screen.advance_model_preview();
+        if request.is_none() || preview_changed || last_draw.elapsed() >= Duration::from_millis(100)
+        {
             screen.draw(&input, request.as_ref().map(Request::status))?;
             last_draw = Instant::now();
         }
@@ -189,7 +191,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                         }
                     },
                     Reply::Run(Err(error)) => {
-                        screen.model_failed();
+                        screen.model_failed()?;
                         screen.line(&format!("error: {error}"), Tone::Error)?;
                         screen.line(&format!("Failed · {elapsed}"), Tone::Error)?;
                     },

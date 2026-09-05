@@ -109,11 +109,18 @@ fn backend(directory: PathBuf) -> (OpenAiResponsesBackend, std::thread::JoinHand
                     ));
                 }
             }
-            body.push_str(&format!(
-                "data: {}\n\n",
+            let terminal = if directory.join(format!("fail-completion-{index}")).exists() {
+                json!({"type":"response.failed", "response":{"error":{"message":"fixture stream failed"}}})
+            } else {
                 json!({"type":"response.completed", "response":response})
-            ));
-            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            };
+            let completion = format!("data: {terminal}\n\n");
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len() + completion.len()).unwrap();
+            socket.flush().unwrap();
+            while directory.join(format!("hold-completion-{index}")).exists() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            socket.write_all(completion.as_bytes()).unwrap();
         }
     });
     (
@@ -360,6 +367,63 @@ impl Pty {
             self.raw.windows(8).any(|bytes| bytes == b"\x1b[?2004l"),
             "bracketed paste not restored"
         );
+    }
+}
+
+#[test]
+fn pty_paces_model_preview_before_commit_and_flushes_at_success_or_failure() {
+    for fail in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let text = format!("livepreview-{}\nreceived-tail", "字".repeat(400));
+        let response = json!({"status":"completed", "output":[{"type":"message", "content":[{"type":"output_text", "text":text}]}]});
+        std::fs::write(
+            directory.path().join("first-response.json"),
+            response.to_string(),
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("hold-completion-0"), "").unwrap();
+        if fail {
+            std::fs::write(directory.path().join("fail-completion-0"), "").unwrap();
+        }
+        let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "terminal_fixture", "--nocapture"]);
+        command.env(FIXTURE_ENV, directory.path());
+        let mut pty = Pty::start_process(command, directory, Some(false), false);
+        pty.ready();
+        pty.send(b"show paced output\r");
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("livepreview-字"),
+            "model preview before terminal event and with no tool output",
+        );
+        let first = pty.parser.screen().contents().matches('字').count();
+        assert!(!pty.parser.screen().contents().contains("received-tail"));
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().matches('字').count() > first,
+            "preview advances without another upstream write",
+        );
+        assert!(!pty.parser.screen().contents().contains("received-tail"));
+        std::fs::remove_file(pty.directory.path().join("hold-completion-0")).unwrap();
+        pty.wait_for(
+            |p| {
+                p.frame_complete()
+                    && p.parser.screen().contents().contains("received-tail")
+                    && p.parser.screen().contents().contains(if fail {
+                        "Failed ·"
+                    } else {
+                        "Completed ·"
+                    })
+            },
+            "terminal event flushes queued text and restores input",
+        );
+        assert_eq!(
+            pty.parser
+                .screen()
+                .contents()
+                .contains("[response incomplete]"),
+            fail
+        );
+        pty.send(b"/exit\r");
+        pty.finish();
     }
 }
 

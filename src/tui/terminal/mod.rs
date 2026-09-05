@@ -1,9 +1,11 @@
 mod backend;
 mod markdown;
+mod preview;
 
 use backend::InlineBackend;
 
 use std::io::{self, Write};
+use std::time::Instant;
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -18,6 +20,7 @@ use crossterm::{
         supports_keyboard_enhancement,
     },
 };
+use preview::Preview;
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     widgets::{Paragraph, Widget},
@@ -32,7 +35,7 @@ pub struct Screen {
     terminal: Terminal<InlineBackend>,
     mode: TerminalMode,
     tail: OutputTail,
-    preview: String,
+    preview: Preview,
     colors: bool,
 }
 
@@ -113,7 +116,7 @@ impl Screen {
             terminal,
             mode,
             tail: OutputTail::default(),
-            preview: String::new(),
+            preview: Preview::default(),
             colors,
         })
     }
@@ -215,7 +218,14 @@ impl Screen {
         self.append("")?;
         let size = self.terminal.size()?;
         let layout = render::InputLayout::new(input, size.width);
-        let height = (if status.is_some() { 1 } else { layout.height() }
+        let reserved = 2 + u16::from(status.is_some()) + u16::from(!self.tail.text.is_empty());
+        let preview = render::preview_lines(
+            self.preview.visible(),
+            size.width,
+            size.height.saturating_sub(reserved),
+        );
+        let height = (preview.len() as u16
+            + if status.is_some() { 1 } else { layout.height() }
             + 1
             + u16::from(!self.tail.text.is_empty())
             + u16::from(status.is_some()))
@@ -243,7 +253,7 @@ impl Screen {
                 &layout,
                 status,
                 &self.tail,
-                &self.preview,
+                &preview,
                 self.colors,
                 shift_enter,
             )
@@ -252,7 +262,11 @@ impl Screen {
     }
 
     pub fn model_delta(&mut self, text: &str) {
-        self.preview.push_str(&render::safe_text(text));
+        self.preview.push(&render::safe_text(text), Instant::now());
+    }
+
+    pub fn advance_model_preview(&mut self) -> bool {
+        self.preview.advance(Instant::now())
     }
 
     pub fn model_commit(&mut self, text: &str, publish: bool) -> io::Result<()> {
@@ -264,10 +278,15 @@ impl Screen {
         }
     }
 
-    pub fn model_failed(&mut self) {
-        if !self.preview.is_empty() {
-            self.preview.push_str("\n\n[response incomplete]");
+    pub fn model_failed(&mut self) -> io::Result<()> {
+        // Failure ends pacing immediately. Publish the entire received draft
+        // as literal text so it survives the next request and terminal exit.
+        let draft = self.preview.take();
+        if !draft.is_empty() {
+            self.line(&draft, Tone::Text)?;
+            self.line("[response incomplete]", Tone::Error)?;
         }
+        Ok(())
     }
 
     fn append(&mut self, text: &str) -> io::Result<()> {

@@ -74,6 +74,14 @@ in a replaceable preview while it is generated and published as complete
 Markdown only after the model turn commits. Failed partial output remains
 visible as an incomplete draft and is not committed.
 
+Model previews reveal grapheme clusters in small batches, accelerating for
+larger bursts. Up to six recent wrapped rows remain visible, subject to terminal
+height. Commit replaces the preview immediately with authoritative Markdown;
+failure publishes all received draft text literally with an incomplete marker.
+Presentation pacing never delays event reception, tool execution, or shutdown,
+and does not continue playing an animation after completion. Short responses
+may complete before a preview frame is drawn. There is no pacing configuration.
+
 The TUI parses each completed model answer as one Markdown document so reference
 links can resolve across paragraphs, then formats and publishes one top-level
 block at a time. It does not incrementally parse model tokens as final Markdown;

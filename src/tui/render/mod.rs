@@ -148,45 +148,67 @@ impl OutputTail {
     }
 }
 
+/// A bounded view of the latest preview rows. Rewrap only the temporary
+/// display; completed Markdown retains its existing scrollback owner.
+pub fn preview_lines(text: &str, width: u16, available_rows: u16) -> Vec<String> {
+    if text.is_empty() || available_rows == 0 {
+        return Vec::new();
+    }
+    let mut tail = OutputTail::default();
+    let mut rows = tail.push(text, width.saturating_sub(CONTENT_PREFIX));
+    rows.push(tail.text);
+    let height = usize::from(available_rows.min(6));
+    if rows.len() > height {
+        rows.drain(..rows.len() - height);
+    }
+    rows
+}
+
 pub fn draw(
     frame: &mut Frame,
     input: &InputLayout,
     status: Option<Status<'_>>,
     tail: &OutputTail,
-    preview: &str,
+    preview: &[String],
     colors: bool,
     shift_enter: bool,
 ) {
     let areas = Layout::vertical([
+        Constraint::Length(preview.len() as u16),
         Constraint::Length(u16::from(!tail.text.is_empty())),
         Constraint::Length(u16::from(status.is_some())),
         Constraint::Min(1),
         Constraint::Length(u16::from(frame.area().height > 1)),
     ])
     .split(frame.area());
+    frame.render_widget(
+        Paragraph::new(
+            preview
+                .iter()
+                .map(|row| Line::raw(format!("  {row}")))
+                .collect::<Vec<_>>(),
+        )
+        .style(Tone::Text.style(colors)),
+        areas[0],
+    );
     let prefix = u16::from(tail.tone == Tone::Text) * CONTENT_PREFIX;
     let output_area = ratatui::layout::Rect::new(
-        areas[0].x + prefix.min(areas[0].width),
-        areas[0].y,
-        areas[0].width.saturating_sub(prefix),
-        areas[0].height,
+        areas[1].x + prefix.min(areas[1].width),
+        areas[1].y,
+        areas[1].width.saturating_sub(prefix),
+        areas[1].height,
     );
     frame.render_widget(
-        Paragraph::new(if preview.is_empty() {
-            tail.text.as_str()
-        } else {
-            preview
-        })
-        .style(tail.tone.style(colors)),
+        Paragraph::new(tail.text.as_str()).style(tail.tone.style(colors)),
         output_area,
     );
     if let Some(status) = status {
         frame.render_widget(
             Paragraph::new(status.text()).style(Tone::Meta.style(colors)),
-            areas[1],
+            areas[2],
         );
     } else {
-        input.draw(frame, areas[2], colors);
+        input.draw(frame, areas[3], colors);
     }
     let hint = if status.is_some() {
         "Ctrl-C: exit and wait for shutdown"
@@ -197,7 +219,7 @@ pub fn draw(
     };
     frame.render_widget(
         Paragraph::new(hint).style(Tone::Meta.style(colors)),
-        areas[3],
+        areas[4],
     );
 }
 
@@ -222,6 +244,48 @@ pub fn line(text: String, tone: Tone, colors: bool) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_has_its_own_rows_and_keeps_the_latest_text_after_resize() {
+        let text = "old\n中文e\u{301}\nlatest";
+        let preview = preview_lines(text, 20, 2);
+        assert_eq!(preview, ["中文e\u{301}", "latest"]);
+        assert_eq!(preview_lines(text, 20, 1), ["latest"]);
+        assert!(preview_lines(text, 20, 0).is_empty());
+        for tail_text in ["", "tool tail"] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 6)).unwrap();
+            let input = InputLayout::new(&crate::tui::input::Input::default(), 20);
+            let tail = OutputTail {
+                text: tail_text.into(),
+                tone: Tone::Meta,
+            };
+            terminal
+                .draw(|frame| {
+                    draw(
+                        frame,
+                        &input,
+                        Some(Status {
+                            label: "Waiting",
+                            elapsed: std::time::Duration::ZERO,
+                        }),
+                        &tail,
+                        &preview,
+                        true,
+                        false,
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row: String = (0..20).map(|x| buffer[(x, 1)].symbol()).collect();
+            assert_eq!(row.trim_end(), "  latest");
+            assert_eq!(buffer[(2, 1)].fg, Color::Reset);
+            if !tail_text.is_empty() {
+                let row: String = (0..20).map(|x| buffer[(x, 2)].symbol()).collect();
+                assert_eq!(row.trim_end(), tail_text);
+            }
+        }
+    }
 
     #[test]
     fn narrow_status_keeps_elapsed_time_beside_unfinished_output() {
@@ -249,7 +313,7 @@ mod tests {
                             elapsed: std::time::Duration::from_secs(seconds),
                         }),
                         &tail,
-                        "",
+                        &[],
                         false,
                         false,
                     );

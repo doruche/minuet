@@ -1,6 +1,6 @@
 # Stream-only Responses inference and live TUI previews
 
-Status: implementation authorized and in progress; cutover pending.
+Status: closed; cutover complete.
 
 Decision date: 2026-09-05.
 
@@ -287,3 +287,26 @@ decisions, the cutover outcome, and a reference to the implementation PR or
 validation record. Preserve the original baseline as historical context rather
 than updating it into a map of the resulting code. Mark the ECP closed only
 after implementation, validation, and semantic cutover are complete.
+
+## Cutover record
+
+Implementation commits: `5bf0302`, `93ac437`, `5148167`, and `9e37a25`.
+
+Validation completed on 2026-09-06:
+
+- Formatting, clippy with `-D warnings`, all targets and features, and
+  `nix flake check --all-systems --no-build` passed.
+- Unit, CLI, and all 39 PTY/TUI tests passed. Fixtures exercise multiple SSE
+  deltas before `response.completed`, tool continuation, failure retention,
+  and final Markdown publication without duplication.
+- The live MiniMax-M3 probe `responses_tool_loop_and_input_count` passed with
+  the configured Responses endpoint, verifying streamed tool execution,
+  subsequent final text, and input-token reporting.
+- Final source review found no blocking architecture friction: inference owns
+  wire framing and deadlines, runtime owns commit handoff, and TUI owns
+  preview withdrawal and terminal publication.
+
+The stream-only generation policy, provisional-versus-committed observation
+boundary, and replaceable TUI preview are now cut over. This ECP is closed as
+historical provenance; its baseline remains unchanged and it is not a source
+path index.

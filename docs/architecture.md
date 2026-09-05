@@ -20,6 +20,10 @@ replaceable policy or external adaptation.
   writable conversation.
 - `tool` owns the compiled tool set and its runtime enabled subset. The initial
   function tools are `echo`, `random_integer`, and `current_datetime`.
+  Tools use JSON values as Minuet's heterogeneous input/output protocol; this
+  is a domain choice, while provider adapters own wire serialization. A tool's
+  definition is sampled once at registration and is the immutable contract for
+  that registered capability.
 - `inference` defines a protocol-neutral backend capability.
   `openai_responses` alone owns OpenAI Responses wire JSON and HTTP behavior.
 
@@ -88,6 +92,8 @@ completion events or retain the capability beyond its invocation. Writes apply
 backpressure and preserve text without adding newlines; large writes are split
 at UTF-8 boundaries. Progress text is presentation data, not session history.
 The tool's final return value remains the sole source of its committed result.
+The registry encodes that JSON value, and execution errors or skipped calls,
+through one shared result encoder before they cross into session history.
 
 A `ToolFinished` event reports execution (or an explicit skip), not successful
 session commit or overall run success. Later commit or inference failures remain

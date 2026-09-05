@@ -5,7 +5,7 @@ use crate::{
     inference::{ConversationItem, InferenceBackend, InferenceRequest, OutputEffect, ToolCall},
     model::ReasoningEffort,
     session::{SessionId, SessionStore},
-    tool::{ToolDefinition, ToolRegistry},
+    tool::{ToolDefinition, ToolRegistry, encode_error},
 };
 
 use super::{CommittedModelTurn, CommittedToolRound, LoopError, ToolActivity};
@@ -138,13 +138,7 @@ impl<'a> LoopContext<'a> {
         for call in pending.calls {
             results.push(ConversationItem::FunctionCallOutput {
                 call_id: call.call_id,
-                output: serde_json::json!({
-                    "error": {
-                        "kind": "step_limit",
-                        "message": STEP_LIMIT_OUTPUT
-                    }
-                })
-                .to_string(),
+                output: encode_error("step_limit", STEP_LIMIT_OUTPUT),
             });
             activities.push(ToolActivity {
                 name: call.name,

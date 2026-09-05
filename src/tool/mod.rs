@@ -12,15 +12,22 @@ mod output;
 pub use output::ToolOutput;
 mod random_integer;
 
+/// Metadata and parameter schema exposed by a registered tool. JSON is the
+/// Minuet tool protocol's heterogeneous value representation, independent of
+/// any provider's HTTP format.
 #[derive(Clone, Debug)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
+    /// JSON Schema describing the JSON argument value accepted by `invoke`.
+    /// The tool remains the authority for complete validation.
     pub parameters: Value,
 }
 
 #[async_trait]
 pub trait Tool: Send + Sync {
+    /// Returns the immutable registration contract. The registry snapshots it
+    /// once; subsequent calls are not used for routing or presentation.
     fn definition(&self) -> ToolDefinition;
 
     async fn invoke(&self, arguments: Value, output: &dyn ToolOutput) -> Result<Value, ToolError>;
@@ -35,7 +42,10 @@ pub struct ToolStatus {
 
 #[derive(Clone, Debug)]
 pub struct ToolInvocation {
+    /// JSON protocol text committed to model history by the loop.
     pub output: String,
+    /// Execution status for observers; the encoded output remains authoritative
+    /// for the model-facing protocol.
     pub is_error: bool,
 }
 
@@ -134,7 +144,7 @@ impl ToolRegistry {
         };
         match registered.tool.invoke(arguments, output).await {
             Ok(value) => ToolInvocation {
-                output: value.to_string(),
+                output: encode_result(&value),
                 is_error: false,
             },
             Err(error) => invocation_error(error.kind(), error.to_string()),
@@ -154,14 +164,33 @@ fn validate_definition(definition: &ToolDefinition) -> Result<(), ToolRegistryEr
             definition.name
         )));
     }
+    if let Some(schema_type) = definition.parameters.get("type")
+        && schema_type.as_str() != Some("object")
+    {
+        return Err(ToolRegistryError::InvalidDefinition(format!(
+            "tool `{}` parameters schema must describe an object",
+            definition.name
+        )));
+    }
     Ok(())
 }
 
 fn invocation_error(kind: &str, message: String) -> ToolInvocation {
     ToolInvocation {
-        output: json!({"error":{"kind":kind,"message":message}}).to_string(),
+        output: encode_error(kind, message),
         is_error: true,
     }
+}
+
+/// Encodes the tool protocol result at the agent/session boundary. Keeping
+/// this here prevents each caller (including skipped calls) from inventing a
+/// different JSON envelope.
+pub(crate) fn encode_result(value: &Value) -> String {
+    value.to_string()
+}
+
+pub(crate) fn encode_error(kind: &str, message: impl Into<String>) -> String {
+    json!({"error":{"kind":kind,"message":message.into()}}).to_string()
 }
 
 #[derive(Debug, Error)]
@@ -194,6 +223,8 @@ impl ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::Arc;
 
     fn enabled(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
@@ -223,6 +254,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn registration_definition_is_the_routing_and_exposure_snapshot() {
+        struct SnapshotTool;
+        #[async_trait]
+        impl Tool for SnapshotTool {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition {
+                    name: "snapshot".into(),
+                    description: "fixed".into(),
+                    parameters: json!({"type":"object"}),
+                }
+            }
+
+            async fn invoke(
+                &self,
+                _arguments: Value,
+                _output: &dyn ToolOutput,
+            ) -> Result<Value, ToolError> {
+                Ok(json!({"ok": true}))
+            }
+        }
+
+        let registry = ToolRegistry::new(
+            [Arc::new(SnapshotTool) as Arc<dyn Tool>],
+            &["snapshot".into()],
+        )
+        .unwrap();
+        assert_eq!(registry.list()[0].name, "snapshot");
+        assert_eq!(registry.definitions()[0].description, "fixed");
+    }
+
     #[tokio::test]
     async fn reports_invalid_random_ranges_to_the_model() {
         let registry = ToolRegistry::with_builtins(&enabled(&["random_integer"])).unwrap();
@@ -231,5 +293,28 @@ mod tests {
             .await;
         assert!(invocation.is_error);
         assert!(invocation.output.contains("invalid_arguments"));
+    }
+
+    #[test]
+    fn result_and_error_encoding_are_json_protocol_values() {
+        assert_eq!(encode_result(&json!({"value": 3})), r#"{"value":3}"#);
+        assert_eq!(
+            encode_error("execution_error", "failed"),
+            r#"{"error":{"kind":"execution_error","message":"failed"}}"#
+        );
+    }
+
+    #[test]
+    fn rejects_non_object_parameter_schema_types() {
+        let definition = ToolDefinition {
+            name: "bad_schema".into(),
+            description: "invalid".into(),
+            parameters: json!({"type": "string"}),
+        };
+        assert!(matches!(
+            validate_definition(&definition),
+            Err(ToolRegistryError::InvalidDefinition(message))
+                if message.contains("must describe an object")
+        ));
     }
 }

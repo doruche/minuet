@@ -191,10 +191,24 @@ api_key_env = "MINUET_CLI_TEST_KEY"
 
 fn respond(mut socket: TcpStream, status: &str, body: Value) {
     let body = if status.starts_with('2') {
-        format!(
+        let mut stream = String::new();
+        if let Some(text) = body
+            .pointer("/output/0/content/0/text")
+            .and_then(Value::as_str)
+        {
+            let split = text.floor_char_boundary(text.len() / 2);
+            for delta in [&text[..split], &text[split..]] {
+                stream.push_str(&format!(
+                    "data: {}\n\n",
+                    json!({"type":"response.output_text.delta", "delta":delta})
+                ));
+            }
+        }
+        stream.push_str(&format!(
             "data: {}\n\n",
             json!({"type":"response.completed", "response":body})
-        )
+        ));
+        stream
     } else {
         body.to_string()
     };

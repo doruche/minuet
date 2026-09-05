@@ -88,6 +88,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
     // An observer exists only for the active run. Completion drains and drops
     // it before accepting another request; it never determines run completion.
     let mut events: Option<mpsc::Receiver<RunEvent>> = None;
+    let mut last_draw = Instant::now() - Duration::from_millis(100);
     let mut redraw = tokio::time::interval(Duration::from_millis(100));
     redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let interrupt = tokio::signal::ctrl_c();
@@ -95,7 +96,10 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
     screen.line("Minuet — /help for commands", Tone::Meta)?;
 
     loop {
-        screen.draw(&input, request.as_ref().map(Request::status))?;
+        if request.is_none() || last_draw.elapsed() >= Duration::from_millis(100) {
+            screen.draw(&input, request.as_ref().map(Request::status))?;
+            last_draw = Instant::now();
+        }
         tokio::select! {
             biased;
             signal = &mut interrupt => {

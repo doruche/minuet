@@ -96,10 +96,23 @@ fn backend(directory: PathBuf) -> (OpenAiResponsesBackend, std::thread::JoinHand
             while directory.join(format!("hold-response-{index}")).exists() {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            let body = format!(
+            let mut body = String::new();
+            if let Some(text) = response
+                .pointer("/output/0/content/0/text")
+                .and_then(Value::as_str)
+            {
+                let split = text.floor_char_boundary(text.len() / 2);
+                for delta in [&text[..split], &text[split..]] {
+                    body.push_str(&format!(
+                        "data: {}\n\n",
+                        json!({"type":"response.output_text.delta", "delta":delta})
+                    ));
+                }
+            }
+            body.push_str(&format!(
                 "data: {}\n\n",
                 json!({"type":"response.completed", "response":response})
-            );
+            ));
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         }
     });

@@ -41,7 +41,7 @@ pub struct Inline {
 
 // Owns only terminal modes. It exists before fallible viewport setup, so both
 // partial initialization failures and unwinding restore the terminal. Kernel
-// shutdown runs after CLI teardown and does not own these resources.
+// shutdown runs after TUI teardown and does not own these resources.
 struct TerminalMode {
     active: bool,
     keyboard_enhanced: bool,

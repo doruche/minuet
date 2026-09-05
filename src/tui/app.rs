@@ -45,7 +45,7 @@ impl UserInput {
         // Blocking pipe/console reads cannot be cancelled portably. Keep this
         // process-lifetime reader outside Tokio's blocking pool so runtime
         // teardown never joins a read waiting for external input. It owns only
-        // stdin and this bounded sender; after CLI exit a blocked read is
+        // stdin and this bounded sender; after TUI exit a blocked read is
         // reclaimed at process exit, and a completed read observes disconnect.
         std::thread::Builder::new()
             .name("minuet-stdin".into())

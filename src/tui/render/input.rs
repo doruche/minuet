@@ -7,7 +7,7 @@ use super::{super::input::Input, Tone};
 /// Immutable projection of Input's buffer and cursor at one terminal width.
 /// Rebuilt for each draw, never edited or retained across input changes. Height,
 /// wrapping and hardware cursor placement all use this same projection.
-pub(in crate::cli) struct InputLayout {
+pub(in crate::tui) struct InputLayout {
     lines: Vec<String>,
     cursor: (usize, u16),
     prefix: u16,

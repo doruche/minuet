@@ -94,9 +94,9 @@ session commit or overall run success. Later commit or inference failures remain
 observable through the run's returned error. `RunOutcome` retains its immutable
 summary for callers that do not need live observation.
 
-## CLI and terminal ownership
+## TUI and terminal ownership
 
-`cli::app` owns pending user requests and coordinates input, progress and display.
+`tui::app` owns pending user requests and coordinates input, progress and display.
 Its status label is only a projection of received events; the pending request
 controls input admission. Run progress is drained before displaying the returned
 outcome, and the outcome's tool summary is not replayed after live observation.
@@ -108,13 +108,13 @@ A shared help renderer derives layout from that declaration; bare groups are
 informational help requests, while invalid leaf arguments remain errors.
 The output boundary owns terminal styling and line endings.
 
-`cli::input` owns one editing component and its buffer. Grapheme-aware operations
+`tui::input` owns one editing component and its buffer. Grapheme-aware operations
 adapt the component's scalar cursor positions through its editing API. There is
-no second writable input string. `cli::render` owns presentation conventions;
+no second writable input string. `tui::render` owns presentation conventions;
 its unfinished output line is a bounded-by-display-width rendering tail, not a
 second conversation. Completed display rows are handed to terminal scrollback.
 
-`cli::terminal` owns terminal modes and output. Setup establishes its cleanup
+`tui::terminal` owns terminal modes and output. Setup establishes its cleanup
 guard before fallible viewport initialization; normal exit, errors and unwinding
 restore terminal modes. The interaction task is the sole terminal input reader,
 including synchronous cursor-position queries made by inline rendering. A

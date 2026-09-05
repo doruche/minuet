@@ -1,4 +1,4 @@
-mod cli;
+mod tui;
 
 use std::{error::Error, sync::Arc};
 
@@ -43,9 +43,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
             default_reasoning_effort: config.default_reasoning_effort,
         },
     )?;
-    let cli_result = cli::run(running.handle()).await;
+    let tui_result = tui::run(running.handle()).await;
     let shutdown_result = running.shutdown().await;
-    cli_result?;
+    tui_result?;
     shutdown_result?;
     Ok(())
 }

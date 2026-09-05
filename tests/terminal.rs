@@ -2,8 +2,8 @@
 
 // Exercise the actual binary-private interaction layer without exporting UI
 // internals or adding a test tool / alternate startup path to the product.
-#[path = "../src/cli/mod.rs"]
-mod cli;
+#[path = "../src/tui/mod.rs"]
+mod tui;
 
 use std::{
     io::{BufRead, Read, Write},
@@ -99,7 +99,7 @@ fn backend(directory: PathBuf) -> (OpenAiResponsesBackend, std::thread::JoinHand
 }
 
 // Re-executed by the tests below in a PTY or with pipes. This test-only process
-// runs the same CLI with a real kernel, adapter and a tool gated by the parent.
+// runs the same TUI with a real kernel, adapter and a tool gated by the parent.
 #[tokio::test]
 async fn terminal_fixture() {
     let Some(directory) = std::env::var_os(FIXTURE_ENV).map(PathBuf::from) else {
@@ -131,7 +131,7 @@ async fn terminal_fixture() {
         },
     )
     .unwrap();
-    let result = cli::run(running.handle()).await;
+    let result = tui::run(running.handle()).await;
     let shutdown = running.shutdown().await;
     result.unwrap();
     shutdown.unwrap();

@@ -2,7 +2,7 @@ use std::{future::Future, io, pin::Pin};
 
 use crossterm::event::{self, Event};
 use minuet::{
-    agent_loop::{RunEvent, RunOutcome},
+    agent_loop::{RunEvent, RunOutcome, RunStopReason},
     kernel::{KernelError, KernelHandle, RunRequest},
 };
 use tokio::sync::mpsc;
@@ -26,7 +26,11 @@ async fn next_event() -> io::Result<Event> {
     loop {
         // Inline rendering also reads cursor-position replies. Keep all reads
         // on this interaction task so another reader cannot steal those replies.
-        if event::poll(std::time::Duration::ZERO)? {
+        // Crossterm 0.29's use-dev-tty source skips reads for a zero timeout.
+        // A bounded poll keeps one input reader while covering cursor replies
+        // and SIGWINCH without the default Mio source's lost readiness edge.
+        // Return to ZERO when that source supports nonblocking polls.
+        if event::poll(std::time::Duration::from_millis(1))? {
             return event::read();
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -36,7 +40,14 @@ async fn next_event() -> io::Result<Event> {
 pub async fn run(kernel: KernelHandle) -> io::Result<()> {
     let mut screen = Screen::open()?;
     let result = interact(kernel, &mut screen).await;
-    let restore = screen.finish();
+    // An I/O failure can leave the viewport anchor unknown (including a failed
+    // cursor query after Markdown publication). Restore modes without clearing
+    // through a stale anchor and erasing already published output.
+    let restore = if result.is_ok() {
+        screen.finish()
+    } else {
+        screen.restore_modes()
+    };
     result.and(restore)
 }
 
@@ -120,7 +131,16 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                 request = None;
                 status.clear();
                 match result {
-                    Ok(Reply::Run(outcome)) => screen.markdown(&render::outcome(&outcome))?,
+                    Ok(Reply::Run(outcome)) => {
+                        if outcome.text.is_empty() {
+                            screen.line("(no text output)", Tone::Meta)?;
+                        } else {
+                            screen.markdown(&outcome.text)?;
+                        }
+                        if outcome.stop_reason == RunStopReason::StepLimit {
+                            screen.line("run stopped: model-turn limit reached; pending tool calls were not executed", Tone::Error)?;
+                        }
+                    },
                     Ok(Reply::Command(text)) => screen.line(&text, Tone::Text)?,
                     Err(error) => screen.line(&format!("error: {error}"), Tone::Error)?,
                 }

@@ -71,6 +71,16 @@ ANSI escapes and carriage returns) are displayed literally. Progress is separate
 from the final result; both can contain overlapping content. Model responses
 remain non-streaming.
 
+The TUI parses each completed model answer as one Markdown document so reference
+links can resolve across paragraphs, then formats and publishes one top-level
+block at a time. It does not incrementally parse model tokens. The supported
+dialect is CommonMark with tables, task lists and strikethrough; raw HTML stays
+literal and images are text placeholders. Recognized code languages use bundled
+syntax highlighting; absent or unknown language labels use ordinary code text.
+Tables are clipped at the terminal's right edge without responsive layout or
+horizontal scrolling. Links require OSC 8 support, with no detection or fallback.
+`NO_COLOR` disables Markdown styling too, while preserving hyperlinks.
+
 On horizontal shrink, the currently displayed screen is moved into terminal
 scrollback before redraw because the current renderer otherwise clears it. This
 preserves output but may also retain a snapshot of the previous input/status

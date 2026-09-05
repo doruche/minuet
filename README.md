@@ -79,6 +79,15 @@ deletes and moves across whole grapheme clusters, including Chinese text. Input
 history, completion menus, and accepting additional input during a run are not
 implemented.
 
+Completed model answers render as Markdown, including headings, emphasis,
+lists, quotes, tables, and syntax-highlighted code blocks. Paragraphs and code
+wrap at the terminal width; tables keep their natural column widths and clip
+at the right edge. Images display an `[img]` placeholder and their description.
+Links display only their label and use OSC 8 hyperlinks; activation (such as
+Ctrl+Click) is handled by your terminal. Minuet assumes a modern terminal and
+does not probe hyperlink support. Tool output and command results remain
+literal text; `chat` continues to return the original Markdown.
+
 Tools can publish text while they execute. The display shows `Running`, live
 fragments (including text without a trailing newline), and `Ran`, `Failed`, or
 `Skipped` followed by a separately labelled final result. Process output is not

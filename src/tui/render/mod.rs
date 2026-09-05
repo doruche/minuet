@@ -1,8 +1,9 @@
 mod input;
+pub(super) mod markdown;
 
 pub(super) use input::InputLayout;
 
-use minuet::agent_loop::{RunOutcome, RunStopReason, ToolActivity, ToolActivityStatus};
+use minuet::agent_loop::{ToolActivity, ToolActivityStatus};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout},
@@ -158,21 +159,6 @@ pub fn tool_result(activity: &ToolActivity, elapsed: std::time::Duration) -> (St
     (format!("{verb} {}{duration}", activity.name), tone)
 }
 
-pub fn outcome(outcome: &RunOutcome) -> String {
-    let text = if outcome.text.is_empty() {
-        "(no text output)"
-    } else {
-        &outcome.text
-    };
-    if outcome.stop_reason == RunStopReason::StepLimit {
-        format!(
-            "{text}\nrun stopped: model-turn limit reached; pending tool calls were not executed"
-        )
-    } else {
-        text.to_owned()
-    }
-}
-
 pub fn line(text: String, tone: Tone, colors: bool) -> Line<'static> {
     Line::styled(text, tone.style(colors))
 }
@@ -201,20 +187,5 @@ mod tests {
     #[test]
     fn renders_controls_as_text() {
         assert_eq!(safe_text("a\x1b[2J\r\nb\t"), "a\\u{1b}[2J\\r\nb    ");
-    }
-
-    #[test]
-    fn markdown_produces_styled_blocks() {
-        let text = tui_markdown::from_str("# Title\n\n**bold** and `code`");
-        assert!(text.lines.len() >= 2);
-        let rendered = text
-            .lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(rendered.contains("Title"));
-        assert!(rendered.contains("bold"));
-        assert!(rendered.contains("code"));
     }
 }

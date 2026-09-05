@@ -1,8 +1,9 @@
 mod backend;
+mod markdown;
 
 use backend::InlineBackend;
 
-use std::io;
+use std::io::{self, Write};
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -11,7 +12,7 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    style::{Attribute, ResetColor, SetAttribute},
+    style::{Attribute, Print, ResetColor, SetAttribute},
     terminal::{
         BeginSynchronizedUpdate, EndSynchronizedUpdate, disable_raw_mode, enable_raw_mode,
         supports_keyboard_enhancement,
@@ -67,6 +68,7 @@ impl TerminalMode {
         if !self.active {
             return Ok(());
         }
+        let link = execute!(io::stdout(), Print(markdown::RESET_LINK));
         let modes = disable_raw_mode();
         let keyboard = if self.keyboard_enhanced {
             let result = execute!(io::stdout(), PopKeyboardEnhancementFlags);
@@ -85,8 +87,8 @@ impl TerminalMode {
             EndSynchronizedUpdate,
             Show
         );
-        self.active = modes.is_err() || keyboard.is_err() || display.is_err();
-        modes.and(keyboard).and(display)
+        self.active = link.is_err() || modes.is_err() || keyboard.is_err() || display.is_err();
+        link.and(modes).and(keyboard).and(display)
     }
 }
 
@@ -132,21 +134,39 @@ impl Screen {
         Ok(())
     }
 
-    /// Render a complete model answer as Markdown after its block structure is
-    /// known. Tool and status output deliberately continue through `line` so
-    /// incidental punctuation in diagnostics cannot become formatting.
-    pub fn markdown(&mut self, markdown: &str) -> io::Result<()> {
+    pub fn markdown(&mut self, source: &str) -> io::Result<()> {
         self.end_line()?;
-        // Sanitize before parsing so raw control bytes from a model response
-        // cannot reach the terminal backend through Markdown spans.
-        let safe = render::safe_text(markdown);
-        let rendered = tui_markdown::from_str(&safe);
         self.terminal.autoresize()?;
-        let lines = rendered.lines.len().clamp(1, usize::from(u16::MAX)) as u16;
-        self.terminal.insert_before(lines, |buffer| {
-            rendered.clone().render(buffer.area, buffer);
-        })?;
-        Ok(())
+        let area = self.terminal.get_frame().area();
+        self.terminal.clear()?;
+        self.terminal.set_cursor_position((0, area.y))?;
+        // Ratatui 0.30 cells cannot carry hyperlink destinations. Withdraw its
+        // viewport before writing completed rich blocks, then reanchor fresh
+        // buffers at the actual cursor (including native scrollback movement).
+        // Screen alone owns this handoff, including restoration on write error.
+        // Use insert_before for this path when Ratatui can preserve OSC 8 links.
+        let output = (|| {
+            for (index, block) in render::markdown::blocks(source).enumerate() {
+                let block = block.map_err(io::Error::other)?;
+                let width = self.terminal.size()?.width;
+                if index > 0 {
+                    markdown::write_row(self.terminal.backend_mut(), &Vec::new(), self.colors)?;
+                }
+                for row in block.rows(width) {
+                    markdown::write_row(self.terminal.backend_mut(), &row, self.colors)?;
+                }
+                Write::flush(self.terminal.backend_mut())?;
+            }
+            Ok(())
+        })();
+        let anchor = Terminal::with_options(
+            InlineBackend::new(),
+            TerminalOptions {
+                viewport: Viewport::Inline(area.height),
+            },
+        )
+        .map(|terminal| self.terminal = terminal);
+        output.and(anchor)
     }
 
     fn end_line(&mut self) -> io::Result<()> {
@@ -172,6 +192,10 @@ impl Screen {
         let cursor = execute!(self.terminal.backend_mut(), MoveTo(0, area.y));
         let restore = self.mode.restore();
         flush.and(clear).and(cursor).and(restore)
+    }
+
+    pub fn restore_modes(&mut self) -> io::Result<()> {
+        self.mode.restore()
     }
 
     fn draw_frame(&mut self, input: &Input, status: &str, busy: bool) -> io::Result<()> {

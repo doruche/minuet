@@ -67,9 +67,12 @@ fn backend(directory: PathBuf) -> (OpenAiResponsesBackend, std::thread::JoinHand
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
+        let first = std::fs::read(directory.join("first-response.json"))
+            .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap())
+            .unwrap_or_else(|_| json!({"status":"completed", "output":[{"type":"function_call", "call_id":"call-stream", "name":"stream", "arguments":"{}"}]}));
         let responses = [
-            json!({"status":"completed", "output":[{"type":"function_call", "call_id":"call-stream", "name":"stream", "arguments":"{}"}]}),
-            json!({"status":"completed", "output":[{"type":"message", "content":[{"type":"output_text", "text":"assistant-finished"}]}]}),
+            first,
+            json!({"status":"completed", "output":[{"type":"message", "content":[{"type":"output_text", "text": std::fs::read_to_string(directory.join("answer.md")).unwrap_or_else(|_| "assistant-finished".into())}]}]}),
         ];
         for (index, response) in responses.into_iter().enumerate() {
             let (mut socket, _) = listener.accept().unwrap();
@@ -119,7 +122,14 @@ async fn terminal_fixture() {
             backend: Arc::new(backend),
             tools,
             store: Box::new(MemorySessionStore::default()),
-            agent_loop: Arc::new(ReactLoop::new(4).unwrap()),
+            agent_loop: Arc::new(
+                ReactLoop::new(
+                    std::env::var("MINUET_TERMINAL_TEST_LIMIT")
+                        .map(|limit| limit.parse().unwrap())
+                        .unwrap_or(4),
+                )
+                .unwrap(),
+            ),
             context: Arc::new(FullContext),
         },
         KernelOptions {
@@ -313,6 +323,134 @@ impl Pty {
             "bracketed paste not restored"
         );
     }
+}
+
+#[test]
+fn pty_markdown_publishes_blocks_links_and_highlighting_then_restores_input() {
+    for colors in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let answer = format!(
+            "# Heading\n\n{}\n\n```rust\nfn main() {{}}\n```\n\n[label](https://example.test) **bold** ![alt](image.png)\n\n| Long heading | Other |\n| --- | --- |\n| cell | value |\n\nassistant-finished",
+            (0..140)
+                .map(|n| format!("line-{n:03} **text**\n\n"))
+                .collect::<String>()
+        );
+        std::fs::write(directory.path().join("answer.md"), &answer).unwrap();
+        let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "terminal_fixture", "--nocapture"]);
+        command.env(FIXTURE_ENV, directory.path());
+        let mut pty = Pty::start_process(command, directory, Some(false), colors);
+        pty.ready();
+        pty.send(b"markdown please\r");
+        pty.wait_for(
+            |p| p.directory.path().join("waiting").exists(),
+            "tool running",
+        );
+        pty.master
+            .resize(PtySize {
+                rows: 24,
+                cols: 30,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        pty.parser.screen_mut().set_size(24, 30);
+        pty.release();
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("assistant-finished"),
+            "Markdown complete",
+        );
+        let screen = pty.parser.screen();
+        assert!(screen.contents().contains("label bold [img] alt"));
+        assert!(!screen.contents().contains("https://"));
+        let code_row = screen
+            .contents()
+            .lines()
+            .position(|line| line.contains("fn main"))
+            .unwrap() as u16;
+        assert_eq!(
+            matches!(
+                screen.cell(code_row, 0).unwrap().fgcolor(),
+                vt100::Color::Rgb(..)
+            ),
+            colors
+        );
+        let raw = String::from_utf8_lossy(&pty.raw);
+        assert!(raw.contains("\x1b]8;;https://example.test\x1b\\label\x1b]8;;\x1b\\"));
+        pty.parser.screen_mut().set_scrollback(1000);
+        let mut transcript = String::new();
+        for _ in 0..1000 {
+            transcript.push_str(&pty.parser.screen().contents());
+            let offset = pty.parser.screen().scrollback();
+            if offset == 0 {
+                break;
+            }
+            pty.parser
+                .screen_mut()
+                .set_scrollback(offset.saturating_sub(20));
+        }
+        for n in 0..140 {
+            assert!(
+                transcript.contains(&format!("line-{n:03} text")),
+                "lost block {n}"
+            );
+        }
+        pty.parser.screen_mut().set_scrollback(0);
+        pty.send("编辑".as_bytes());
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("> 编辑"),
+            "input after Markdown",
+        );
+        let (row, col) = pty.parser.screen().cursor_position();
+        assert_eq!(col, 6);
+        assert_eq!(
+            pty.parser.screen().cell(row, col).unwrap().bgcolor(),
+            vt100::Color::Default
+        );
+        pty.send(b"\x7f\x7f/exit\r");
+        pty.finish();
+        assert_eq!(pty.master.get_termios().unwrap(), pty.initial_modes);
+    }
+}
+
+#[test]
+fn pty_unclosed_model_code_cannot_capture_the_run_limit_notice() {
+    let directory = tempfile::tempdir().unwrap();
+    let response = json!({"status":"completed", "output":[
+        {"type":"message", "content":[{"type":"output_text", "text":"```rust\nfn partial() {}"}]},
+        {"type":"function_call", "call_id":"call-stream", "name":"stream", "arguments":"{}"}
+    ]});
+    std::fs::write(
+        directory.path().join("first-response.json"),
+        response.to_string(),
+    )
+    .unwrap();
+    let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+    command.args(["--exact", "terminal_fixture", "--nocapture"]);
+    command.env(FIXTURE_ENV, directory.path());
+    command.env("MINUET_TERMINAL_TEST_LIMIT", "1");
+    let mut pty = Pty::start_process(command, directory, Some(false), true);
+    pty.ready();
+    pty.send(b"limited\r");
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains("run stopped:"),
+        "limit notice",
+    );
+    let contents = pty.parser.screen().contents();
+    assert!(
+        contents.contains("fn partial() {}\n```\nrun stopped:"),
+        "{contents:?}"
+    );
+    let row = contents
+        .lines()
+        .position(|line| line.starts_with("run stopped:"))
+        .unwrap() as u16;
+    let cell = pty.parser.screen().cell(row, 0).unwrap();
+    assert_eq!(cell.fgcolor(), vt100::Color::Idx(1));
+    assert!(cell.bold());
+    assert!(!pty.directory.path().join("waiting").exists());
+    pty.send(b"/exit\r");
+    pty.finish();
 }
 
 impl Drop for Pty {

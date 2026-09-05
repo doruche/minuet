@@ -137,11 +137,38 @@ no second writable input string. `tui::render` owns presentation conventions;
 its unfinished output line is a bounded-by-display-width rendering tail, not a
 second conversation. Completed display rows are handed to terminal scrollback.
 
+`tui::render::markdown` parses complete answers and owns block formatting,
+Unicode wrapping, and link destinations on immutable display segments. It
+sanitizes decoded text, including Markdown entities, before publication. Only
+one top-level block's display data is retained; the session's raw model text
+remains authoritative. There is no dormant streaming parser or TUI transcript
+store. Run-stop notices and tool/command output use the literal text path.
+
+`Screen` owns the handoff between Ratatui's inline viewport and rich scrollback
+output. Ratatui 0.30 cells cannot carry hyperlink metadata, so Screen withdraws
+the viewport, publishes completed blocks through the terminal's Markdown writer,
+then recreates display buffers at the actual cursor position. The writer alone
+encodes OSC 8 and percent-escapes controls in destinations. It closes links and
+resets styles at row boundaries and attempts those resets on write failure;
+terminal-mode teardown retries them. If publication or reanchoring fails, the
+error propagates and teardown restores modes without clearing via a possibly
+stale viewport origin. This adapter can move to `insert_before` when Ratatui
+can preserve hyperlinks. Kernel, inference and session contracts do not depend
+on it.
+
 `tui::terminal` owns terminal modes and output. Setup establishes its cleanup
 guard before fallible viewport initialization; normal exit, errors and unwinding
 restore terminal modes. The interaction task is the sole terminal input reader,
 including synchronous cursor-position queries made by inline rendering. A
 competing asynchronous terminal reader would steal those replies.
+
+Crossterm 0.29's Unix `use-dev-tty` event source uses level-triggered polling.
+This avoids the default Mio source losing a cursor-reply readiness edge when a
+resize signal is returned first from the same poll. Its zero-duration poll skips
+reads, so the interaction task uses a one-millisecond bounded poll between async
+waits. Reconsider the source selection when the default source preserves all
+readiness notifications; remove the minimum timeout when zero-duration reads
+work. Neither path retries or hides terminal I/O failures.
 
 Ctrl-C and SIGINT both exit this interaction layer. Returning drops the observer
 and pending request, restores the terminal, and lets `main` run existing kernel

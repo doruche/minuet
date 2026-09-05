@@ -1,6 +1,7 @@
+mod sse;
+mod stream;
 mod wire;
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -14,15 +15,13 @@ use thiserror::Error;
 use tokio::time::{Duration as TokioDuration, timeout};
 
 use super::{InferenceBackend, InferenceError, InferenceRequest, InferenceResponse};
-use wire::{create_request, parse_response, upstream_message};
+use wire::{create_request, upstream_message};
 
 pub struct OpenAiResponsesBackend {
     client: Client,
     responses_url: Url,
     input_tokens_url: Url,
 }
-
-const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
 
 impl OpenAiResponsesBackend {
     pub fn new(base_url: &str, api_key: &str) -> Result<Self, OpenAiResponsesBackendError> {
@@ -76,7 +75,7 @@ impl OpenAiResponsesBackend {
         &self,
         body: &Value,
         observer: Option<&dyn super::InferenceObserver>,
-    ) -> Result<Value, OpenAiResponsesBackendError> {
+    ) -> Result<InferenceResponse, OpenAiResponsesBackendError> {
         let response = self
             .client
             .post(self.responses_url.clone())
@@ -99,138 +98,23 @@ impl OpenAiResponsesBackend {
             });
         }
         let mut bytes = response.bytes_stream();
-        let mut pending = Vec::new();
-        let mut data = String::new();
-        let mut completed = None;
-        let mut finalized_items = BTreeMap::new();
+        let mut decoder = sse::Decoder::default();
+        let mut stream = stream::ResponseStream::default();
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk?;
-            pending.extend_from_slice(&chunk);
-            if !pending.iter().any(|byte| *byte == b'\n' || *byte == b'\r')
-                && pending.len() > MAX_SSE_EVENT_BYTES
-            {
-                return Err(OpenAiResponsesBackendError::MalformedStream(
-                    "SSE event exceeded the size limit",
-                ));
-            }
-            while let Some(line_end) = pending
-                .iter()
-                .position(|byte| *byte == b'\n' || *byte == b'\r')
-            {
-                // Keep a trailing CR until the next chunk so a CRLF split at
-                // the transport boundary remains one line ending.
-                if pending[line_end] == b'\r' && line_end + 1 == pending.len() {
-                    break;
-                }
-                let break_len = usize::from(
-                    pending[line_end] == b'\r' && pending.get(line_end + 1) == Some(&b'\n'),
-                ) + 1;
-                let line =
-                    String::from_utf8(pending.drain(..line_end).collect()).map_err(|_| {
-                        OpenAiResponsesBackendError::MalformedStream("stream was not UTF-8")
-                    })?;
-                pending.drain(..break_len);
-                if line.is_empty() {
-                    if !data.is_empty() {
-                        let event = parse_stream_event(&data)?;
-                        if let Some(value) = event {
-                            if value.get("type").and_then(Value::as_str)
-                                == Some("response.output_text.delta")
-                                && let Some(text) = value.get("delta").and_then(Value::as_str)
-                                && let Some(observer) = observer
-                            {
-                                timeout(TokioDuration::from_secs(120), observer.text_delta(text))
-                                    .await
-                                    .map_err(|_| OpenAiResponsesBackendError::ObserverTimeout)?;
-                            }
-                            match value.get("type").and_then(Value::as_str) {
-                                Some("response.output_item.done") => {
-                                    let index =
-                                        value.get("output_index").and_then(Value::as_u64).ok_or(
-                                            OpenAiResponsesBackendError::MalformedResponse(
-                                                "output_index",
-                                            ),
-                                        )?;
-                                    let item = value.get("item").cloned().ok_or(
-                                        OpenAiResponsesBackendError::MalformedResponse(
-                                            "output item",
-                                        ),
-                                    )?;
-                                    if finalized_items.insert(index, item).is_some() {
-                                        return Err(OpenAiResponsesBackendError::MalformedStream(
-                                            "duplicate output item",
-                                        ));
-                                    }
-                                },
-                                Some("response.completed") => {
-                                    let mut response = value.get("response").cloned().ok_or(
-                                        OpenAiResponsesBackendError::MalformedResponse(
-                                            "completed response",
-                                        ),
-                                    )?;
-                                    if response
-                                        .get("output")
-                                        .and_then(Value::as_array)
-                                        .is_some_and(|output| output.is_empty())
-                                        && !finalized_items.is_empty()
-                                    {
-                                        if finalized_items
-                                            .keys()
-                                            .enumerate()
-                                            .any(|(expected, index)| *index != expected as u64)
-                                        {
-                                            return Err(
-                                                OpenAiResponsesBackendError::MalformedStream(
-                                                    "output indexes were not contiguous",
-                                                ),
-                                            );
-                                        }
-                                        let output =
-                                            finalized_items.values().cloned().collect::<Vec<_>>();
-                                        response["output"] = Value::Array(output);
-                                    }
-                                    completed = Some(response);
-                                },
-                                Some("response.failed") | Some("response.incomplete") => {
-                                    let response = value.get("response").unwrap_or(&value);
-                                    return Err(OpenAiResponsesBackendError::StreamTerminal(
-                                        upstream_message(response),
-                                    ));
-                                },
-                                Some("error") => {
-                                    return Err(OpenAiResponsesBackendError::StreamTerminal(
-                                        upstream_message(&value),
-                                    ));
-                                },
-                                _ => {},
-                            }
-                        }
-                        data.clear();
-                    }
-                } else if let Some(value) = line.strip_prefix("data:") {
-                    let value = value.strip_prefix(' ').unwrap_or(value);
-                    if value != "[DONE]" {
-                        if !data.is_empty() {
-                            data.push('\n');
-                        }
-                        data.push_str(value);
-                        if data.len() > MAX_SSE_EVENT_BYTES {
-                            return Err(OpenAiResponsesBackendError::MalformedStream(
-                                "SSE event exceeded the size limit",
-                            ));
-                        }
-                    }
+            let mut input = chunk.as_ref();
+            while let Some(data) = decoder.next(&mut input)? {
+                if let Some(text) = stream.push(&data)?
+                    && let Some(observer) = observer
+                {
+                    timeout(TokioDuration::from_secs(120), observer.text_delta(&text))
+                        .await
+                        .map_err(|_| OpenAiResponsesBackendError::ObserverTimeout)?;
                 }
             }
         }
-        if !pending.is_empty() || !data.is_empty() {
-            return Err(OpenAiResponsesBackendError::MalformedStream(
-                "stream ended before an SSE event boundary",
-            ));
-        }
-        completed.ok_or(OpenAiResponsesBackendError::MalformedStream(
-            "stream ended without response.completed",
-        ))
+        decoder.finish()?;
+        stream.finish()
     }
 }
 
@@ -241,8 +125,9 @@ impl InferenceBackend for OpenAiResponsesBackend {
         request: InferenceRequest<'_>,
     ) -> Result<InferenceResponse, InferenceError> {
         let body = create_request(&request, true);
-        let response = self.stream(&body, request.observer).await?;
-        parse_response(response).map_err(Into::into)
+        self.stream(&body, request.observer)
+            .await
+            .map_err(Into::into)
     }
 
     async fn count_input_tokens(
@@ -291,14 +176,15 @@ pub enum OpenAiResponsesBackendError {
     MalformedStream(&'static str),
     #[error("stream ended with an upstream error: {0}")]
     StreamTerminal(String),
+    #[error("Responses output integrity error at index {index:?}: {detail}")]
+    OutputIntegrity {
+        index: Option<usize>,
+        detail: &'static str,
+    },
+    #[error("Responses stream resource limit exceeded: {0}")]
+    ResourceLimit(&'static str),
     #[error("stream observer did not accept output before the deadline")]
     ObserverTimeout,
-}
-
-fn parse_stream_event(data: &str) -> Result<Option<Value>, OpenAiResponsesBackendError> {
-    serde_json::from_str(data)
-        .map(Some)
-        .map_err(|_| OpenAiResponsesBackendError::MalformedStream("invalid SSE JSON"))
 }
 
 #[cfg(test)]

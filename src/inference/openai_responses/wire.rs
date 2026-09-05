@@ -65,6 +65,33 @@ fn encode_tool(tool: &ToolDefinition) -> Value {
     })
 }
 
+pub(super) fn validate_output_item(value: &Value) -> Result<(), OpenAiResponsesBackendError> {
+    if let Some(status) = value.get("status").and_then(Value::as_str)
+        && status != "completed"
+    {
+        return Err(OpenAiResponsesBackendError::MalformedResponse(
+            "output item is not completed",
+        ));
+    }
+    match value.get("type").and_then(Value::as_str) {
+        Some("message") => {
+            if !value.get("content").and_then(Value::as_array).is_some() {
+                return Err(OpenAiResponsesBackendError::MalformedResponse(
+                    "message content",
+                ));
+            }
+        },
+        Some("function_call") => {
+            for field in ["call_id", "name", "arguments"] {
+                required_string(value, field)?;
+            }
+        },
+        Some("reasoning") => {},
+        Some(_) | None => {},
+    }
+    Ok(())
+}
+
 pub(super) fn parse_response(
     value: Value,
 ) -> Result<InferenceResponse, OpenAiResponsesBackendError> {
@@ -77,10 +104,15 @@ pub(super) fn parse_response(
     let raw_output = value.get("output").and_then(Value::as_array).ok_or(
         OpenAiResponsesBackendError::MalformedResponse("missing output array"),
     )?;
+    let mut item_ids = std::collections::HashSet::new();
+    let mut call_ids = std::collections::HashSet::new();
     let output = raw_output
         .iter()
         .cloned()
-        .map(parse_output_item)
+        .map(|item| {
+            validate_unique_identities(&item, &mut item_ids, &mut call_ids)?;
+            parse_output_item(item)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let usage = value
         .get("usage")
@@ -91,11 +123,35 @@ pub(super) fn parse_response(
     Ok(InferenceResponse { output, usage })
 }
 
+fn validate_unique_identities(
+    value: &Value,
+    item_ids: &mut std::collections::HashSet<String>,
+    call_ids: &mut std::collections::HashSet<String>,
+) -> Result<(), OpenAiResponsesBackendError> {
+    if let Some(id) = value.get("id").and_then(Value::as_str)
+        && !item_ids.insert(id.to_owned())
+    {
+        return Err(OpenAiResponsesBackendError::MalformedResponse(
+            "duplicate output item identity",
+        ));
+    }
+    if value.get("type").and_then(Value::as_str) == Some("function_call") {
+        let id = required_string(value, "call_id")?;
+        if !call_ids.insert(id.to_owned()) {
+            return Err(OpenAiResponsesBackendError::MalformedResponse(
+                "duplicate call identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_output_item(value: Value) -> Result<ModelOutputItem, OpenAiResponsesBackendError> {
     let item_type = value
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    validate_output_item(&value)?;
     let effect = match item_type {
         "message" => {
             value.get("content").and_then(Value::as_array).ok_or(
@@ -108,12 +164,19 @@ fn parse_output_item(value: Value) -> Result<ModelOutputItem, OpenAiResponsesBac
                 .unwrap()
                 .iter()
                 .filter(|content| {
-                    content.get("type").and_then(Value::as_str) == Some("output_text")
+                    matches!(
+                        content.get("type").and_then(Value::as_str),
+                        Some("output_text") | Some("refusal")
+                    )
                 })
                 .map(|content| {
-                    content.get("text").and_then(Value::as_str).ok_or(
-                        OpenAiResponsesBackendError::MalformedResponse("output_text text"),
-                    )
+                    content
+                        .get("text")
+                        .or_else(|| content.get("refusal"))
+                        .and_then(Value::as_str)
+                        .ok_or(OpenAiResponsesBackendError::MalformedResponse(
+                            "message content text",
+                        ))
                 })
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
@@ -275,5 +338,20 @@ mod tests {
         });
 
         assert_eq!(parse_response(response).unwrap().usage, None);
+    }
+
+    #[test]
+    fn projects_refusal_content_in_order() {
+        let response = json!({
+            "status": "completed",
+            "output": [{"type":"message","content":[
+                {"type":"refusal","refusal":"不能这样做"},
+                {"type":"output_text","text":"请换个问题"}
+            ]}]
+        });
+        let parsed = parse_response(response).unwrap();
+        assert!(
+            matches!(parsed.output[0].effect(), OutputEffect::Text(text) if text == "不能这样做请换个问题")
+        );
     }
 }

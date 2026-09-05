@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_controls_as_text_in_both_output_modes() {
+    fn renders_controls_as_text() {
         assert_eq!(safe_text("a\x1b[2J\r\nb\t"), "a\\u{1b}[2J\\r\nb    ");
     }
 }

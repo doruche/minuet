@@ -94,6 +94,29 @@ session commit or overall run success. Later commit or inference failures remain
 observable through the run's returned error. `RunOutcome` retains its immutable
 summary for callers that do not need live observation.
 
+## CLI entry and one-shot chat
+
+`cli` owns argv grammar and frontend selection. It resolves an invocation before
+configuration loading or runtime construction: help/version need neither, TUI
+requires terminal stdin/stdout, and `chat -` reads all stdin synchronously before
+any kernel exists. There is no background pipe reader to reclaim. Frontends
+receive a resolved prompt or an explicit TUI selection; a renderer does not
+choose application behavior based on terminal detection.
+
+`main` owns component construction and the running kernel's final shutdown/join.
+Both frontend success and failure pass through that barrier; frontend and
+shutdown errors are both reported if both fail. Each process has a fresh memory
+session store.
+
+`cli::chat` owns one request and the shell-facing result contract. It calls
+`KernelHandle::run` without an event subscription and uses the returned
+`RunOutcome` as the authority for completion. stdout contains only final model
+text (or the last turn's text on a step limit); diagnostics and nonzero exit codes
+make failure observable. It does not use TUI commands, rendering or input state.
+SIGINT drops the waiting reply and returns an interrupted exit result to `main`,
+which still joins accepted execution. Interruption does not transfer cancellation
+authority to the frontend.
+
 ## TUI and terminal ownership
 
 `tui::app` owns pending user requests and coordinates input, progress and display.
@@ -122,8 +145,6 @@ competing asynchronous terminal reader would steal those replies.
 
 Ctrl-C and SIGINT both exit this interaction layer. Returning drops the observer
 and pending request, restores the terminal, and lets `main` run existing kernel
-shutdown. This is not cancellation of an accepted run. The pipeline adapter and
-inline renderer consume the same run events and command effects; neither owns
-execution or session transitions. The pipe reader owns only process-lifetime
-stdin and a bounded input sender, so a blocked external read cannot retain the
-kernel or prevent Tokio runtime teardown.
+shutdown. This is not cancellation of an accepted run. The TUI owns its event
+receiver and presentation state; execution and session transitions remain in
+the kernel.

@@ -98,7 +98,7 @@ fn backend(directory: PathBuf) -> (OpenAiResponsesBackend, std::thread::JoinHand
     )
 }
 
-// Re-executed by the tests below in a PTY or with pipes. This test-only process
+// Re-executed by the tests below in a PTY. This test-only process
 // runs the same TUI with a real kernel, adapter and a tool gated by the parent.
 #[tokio::test]
 async fn terminal_fixture() {
@@ -180,6 +180,21 @@ impl Pty {
 
     fn start_with_options(fail: bool, keyboard_reply: Option<bool>, colors: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
+        let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "terminal_fixture", "--nocapture"]);
+        command.env(FIXTURE_ENV, directory.path());
+        if fail {
+            command.env("MINUET_TERMINAL_TEST_FAIL", "1");
+        }
+        Self::start_process(command, directory, keyboard_reply, colors)
+    }
+
+    fn start_process(
+        mut command: CommandBuilder,
+        directory: tempfile::TempDir,
+        keyboard_reply: Option<bool>,
+        colors: bool,
+    ) -> Self {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -189,14 +204,8 @@ impl Pty {
             })
             .unwrap();
         let initial_modes = pair.master.get_termios().unwrap();
-        let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
-        command.args(["--exact", "terminal_fixture", "--nocapture"]);
-        command.env(FIXTURE_ENV, directory.path());
         command.env("TERM", "xterm-256color");
         command.env("NO_COLOR", if colors { "" } else { "1" });
-        if fail {
-            command.env("MINUET_TERMINAL_TEST_FAIL", "1");
-        }
         let child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
         let output = capture(pair.master.try_clone_reader().unwrap());
@@ -622,137 +631,73 @@ fn pty_failure_keeps_progress_and_resize_keeps_input_usable() {
     pty.finish();
 }
 
-// Assertion failures must not strand fixture processes waiting on a gate.
-struct PipeChild(std::process::Child);
-impl Drop for PipeChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn pipe_fixture(directory: &std::path::Path) -> PipeChild {
-    PipeChild(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "terminal_fixture", "--nocapture"])
-            .env(FIXTURE_ENV, directory)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap(),
-    )
-}
-
-#[test]
-fn pipes_stream_without_ansi_or_prompts_and_accept_following_commands() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut child = pipe_fixture(directory.path());
-    let mut input = child.0.stdin.take().unwrap();
-    let output = capture(child.0.stdout.take().unwrap());
-    input.write_all(b"go\n").unwrap();
-    input.flush().unwrap();
-    let mut bytes = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while !String::from_utf8_lossy(&bytes).contains("执行片段-alpha") {
-        assert!(Instant::now() < deadline, "pipe stream stalled");
-        if let Ok(part) = output.recv_timeout(Duration::from_millis(50)) {
-            bytes.extend(part);
-        }
-    }
-    assert!(!directory.path().join("executed").exists());
-    std::fs::write(directory.path().join("release"), "").unwrap();
-    input.write_all(b"/tools list\n/exit\n").unwrap();
-    drop(input);
-    while child.0.try_wait().unwrap().is_none() {
-        if Instant::now() >= deadline {
-            let _ = child.0.kill();
-            panic!("pipe shutdown stalled");
-        }
-        if let Ok(part) = output.recv_timeout(Duration::from_millis(50)) {
-            bytes.extend(part);
-        }
-    }
-    while let Ok(part) = output.recv_timeout(Duration::from_millis(50)) {
-        bytes.extend(part);
-    }
-    assert!(child.0.wait().unwrap().success());
-    let text = String::from_utf8(bytes).unwrap();
-    assert!(!text.contains('\x1b'));
-    assert!(!text.contains("minuet>"));
-    assert!(text.contains("执行片段-alpha-beta\n"));
-    assert!(text.contains("stream (enabled)"));
-    assert!(text.contains("assistant-finished"));
-}
-
 #[test]
 fn commands_own_queries_mutations_and_informational_group_help() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut child = pipe_fixture(directory.path());
-    let mut input = child.0.stdin.take().unwrap();
-    input.write_all(b"/tools\n/context\n/model\n/tools disable stream\n/tools list\n/tools enable stream\n/tools list\n/model effort 'vendor depth'\n/model info\n/model effort clear\n/model info\n/tools enable\n/exit\n").unwrap();
-    drop(input);
-    let mut text = String::new();
-    child
-        .0
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut text)
-        .unwrap();
-    assert!(child.0.wait().unwrap().success());
-    assert!(!text.contains('\x1b'));
-    for expected in [
-        "Usage: /tools",
-        "Usage: /context",
-        "Usage: /model",
-        "tool `stream` disabled",
-        "stream (disabled)",
-        "tool `stream` enabled",
-        "stream (enabled)",
-        "reasoning effort: vendor depth",
-        "reasoning effort: upstream default",
-        "error:",
+    let mut pty = Pty::start(false);
+    pty.ready();
+    for (command, expected) in [
+        ("/tools", "Usage: /tools"),
+        ("/context", "Usage: /context"),
+        ("/model", "Usage: /model"),
+        ("/tools disable stream", "tool `stream` disabled"),
+        ("/tools list", "stream (disabled)"),
+        ("/tools enable stream", "tool `stream` enabled"),
+        ("/tools list", "stream (enabled)"),
+        (
+            "/model effort 'vendor depth'",
+            "reasoning effort set to `vendor depth`",
+        ),
+        ("/model info", "reasoning effort: vendor depth"),
+        ("/model effort clear", "reasoning effort cleared"),
+        ("/model info", "reasoning effort: upstream default"),
+        ("/tools enable", "error:"),
     ] {
-        assert!(text.contains(expected), "missing {expected}: {text}");
+        let start = pty.raw.len();
+        pty.send(format!("{command}\r").as_bytes());
+        pty.wait_for(
+            |p| {
+                // Decode only this command's output so a previous query cannot
+                // satisfy the assertion, even when its result text is identical.
+                let mut response = vt100::Parser::new(24, 80, 0);
+                response.process(&p.raw[start..]);
+                p.frame_complete() && response.screen().contents().contains(expected)
+            },
+            expected,
+        );
     }
+    pty.send(b"/exit\r");
+    pty.finish();
 }
 
 #[test]
-fn sigint_exits_with_pipe_stdin_still_open() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut child = pipe_fixture(directory.path());
-    let mut input = child.0.stdin.take().unwrap();
-    let output = capture(child.0.stdout.take().unwrap());
-    input.write_all(b"/tools list\n").unwrap();
-    input.flush().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(8);
-    let mut bytes = Vec::new();
-    while !String::from_utf8_lossy(&bytes).contains("stream (enabled)") {
-        assert!(Instant::now() < deadline, "fixture did not process command");
-        if let Ok(part) = output.recv_timeout(Duration::from_millis(50)) {
-            bytes.extend(part);
-        }
-    }
-    // Processing the command proves the interaction loop has installed its
-    // signal listener. Keep stdin open: exiting must not require an EOF/read.
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(child.0.id() as i32),
-        nix::sys::signal::Signal::SIGINT,
-    )
-    .unwrap();
-    while child.0.try_wait().unwrap().is_none() {
-        assert!(
-            Instant::now() < deadline,
-            "SIGINT waited for an external stdin read"
+fn binary_default_and_explicit_tui_open_and_restore_the_terminal() {
+    for args in [vec![], vec!["tui"]] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("config.toml"),
+            r#"
+model = "fixture"
+model_provider = "fixture"
+[model_providers.fixture]
+protocol = "openai-responses"
+base_url = "http://127.0.0.1:9"
+api_key_env = "MINUET_CLI_TEST_KEY"
+"#,
+        )
+        .unwrap();
+        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_minuet"));
+        command.args(args);
+        command.env("MINUET_HOME", directory.path());
+        command.env("MINUET_CLI_TEST_KEY", "fixture-key");
+        let mut pty = Pty::start_process(command, directory, Some(false), true);
+        pty.ready();
+        pty.send(b"/model info\r");
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("provider: fixture"),
+            "binary model query",
         );
-        if let Ok(part) = output.recv_timeout(Duration::from_millis(50)) {
-            bytes.extend(part);
-        }
+        pty.send(b"/exit\r");
+        pty.finish();
+        assert_eq!(pty.master.get_termios().unwrap(), pty.initial_modes);
     }
-    while let Ok(part) = output.recv_timeout(Duration::from_millis(50)) {
-        bytes.extend(part);
-    }
-    assert!(child.0.wait().unwrap().success());
-    assert!(String::from_utf8_lossy(&bytes).contains("Exiting; waiting for shutdown."));
-    drop(input);
 }

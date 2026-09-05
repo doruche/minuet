@@ -2,7 +2,7 @@ mod backend;
 
 use backend::InlineBackend;
 
-use std::io::{self, IsTerminal, Write};
+use std::io;
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -27,12 +27,7 @@ use super::{
     render::{self, OutputTail, Tone},
 };
 
-pub enum Screen {
-    Inline(Box<Inline>),
-    Plain { at_line_start: bool },
-}
-
-pub struct Inline {
+pub struct Screen {
     terminal: Terminal<InlineBackend>,
     mode: TerminalMode,
     tail: OutputTail,
@@ -103,11 +98,6 @@ impl Drop for TerminalMode {
 
 impl Screen {
     pub fn open() -> io::Result<Self> {
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            return Ok(Self::Plain {
-                at_line_start: true,
-            });
-        }
         let mode = TerminalMode::enter()?;
         let terminal = Terminal::with_options(
             InlineBackend::new(),
@@ -116,38 +106,21 @@ impl Screen {
             },
         )?;
         let colors = std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
-        Ok(Self::Inline(Box::new(Inline {
+        Ok(Self {
             terminal,
             mode,
             tail: OutputTail::default(),
             colors,
-        })))
-    }
-
-    pub fn interactive(&self) -> bool {
-        matches!(self, Self::Inline(_))
+        })
     }
 
     pub fn fragment(&mut self, text: &str, tone: Tone) -> io::Result<()> {
         let text = render::safe_text(text);
-        match self {
-            Self::Plain { at_line_start } => {
-                let mut stdout = io::stdout().lock();
-                stdout.write_all(text.as_bytes())?;
-                stdout.flush()?;
-                if !text.is_empty() {
-                    *at_line_start = text.ends_with('\n');
-                }
-                Ok(())
-            },
-            Self::Inline(inline) => {
-                if inline.tail.tone != tone && !inline.tail.text.is_empty() {
-                    inline.append("\n")?;
-                }
-                inline.tail.tone = tone;
-                inline.append(&text)
-            },
+        if self.tail.tone != tone && !self.tail.text.is_empty() {
+            self.append("\n")?;
         }
+        self.tail.tone = tone;
+        self.append(&text)
     }
 
     pub fn line(&mut self, text: &str, tone: Tone) -> io::Result<()> {
@@ -160,48 +133,31 @@ impl Screen {
     }
 
     fn end_line(&mut self) -> io::Result<()> {
-        let pending = match self {
-            Self::Plain { at_line_start } => !*at_line_start,
-            Self::Inline(inline) => !inline.tail.text.is_empty(),
-        };
-        if pending {
-            let tone = match self {
-                Self::Inline(inline) => inline.tail.tone,
-                _ => Tone::Text,
-            };
-            self.fragment("\n", tone)?;
+        if !self.tail.text.is_empty() {
+            self.fragment("\n", self.tail.tone)?;
         }
         Ok(())
     }
 
     pub fn draw(&mut self, input: &Input, status: &str, busy: bool) -> io::Result<()> {
-        if let Self::Inline(inline) = self {
-            execute!(inline.terminal.backend_mut(), BeginSynchronizedUpdate)?;
-            let draw = inline.draw(input, status, busy);
-            let end = execute!(inline.terminal.backend_mut(), EndSynchronizedUpdate);
-            draw.and(end)?;
-        }
-        Ok(())
+        execute!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
+        let draw = self.draw_frame(input, status, busy);
+        let end = execute!(self.terminal.backend_mut(), EndSynchronizedUpdate);
+        draw.and(end)
     }
 
     pub fn finish(&mut self) -> io::Result<()> {
         // Restore modes even if flushing or clearing fails. The guard retries
         // failed restoration on drop, while the explicit error stays visible.
         let flush = self.end_line();
-        if let Self::Inline(inline) = self {
-            let area = inline.terminal.get_frame().area();
-            let clear = inline.terminal.clear();
-            let cursor = execute!(inline.terminal.backend_mut(), MoveTo(0, area.y));
-            let restore = inline.mode.restore();
-            flush.and(clear).and(cursor).and(restore)
-        } else {
-            flush
-        }
+        let area = self.terminal.get_frame().area();
+        let clear = self.terminal.clear();
+        let cursor = execute!(self.terminal.backend_mut(), MoveTo(0, area.y));
+        let restore = self.mode.restore();
+        flush.and(clear).and(cursor).and(restore)
     }
-}
 
-impl Inline {
-    fn draw(&mut self, input: &Input, status: &str, busy: bool) -> io::Result<()> {
+    fn draw_frame(&mut self, input: &Input, status: &str, busy: bool) -> io::Result<()> {
         self.append("")?;
         let size = self.terminal.size()?;
         let layout = render::InputLayout::new(input, size.width);
@@ -214,7 +170,7 @@ impl Inline {
         if height != self.terminal.get_frame().area().height {
             // Ratatui 0.30 has no API to change an inline viewport's requested
             // height. Recreate only its display buffers at the same origin;
-            // modes and unfinished output remain owned by this Inline. Replace
+            // modes and unfinished output remain owned by this Screen. Replace
             // this with a height setter when ratatui provides one.
             let origin = self.terminal.get_frame().area().y;
             self.terminal.clear()?;

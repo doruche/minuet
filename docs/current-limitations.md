@@ -62,8 +62,8 @@ there is no cancel-current-run action or second-key force-abort shortcut.
 
 The interactive interface uses the terminal's main screen and scrollback. It has
 basic multiline editing but no input history, completion, selection menus,
-application-owned transcript browser or input queue during execution. Redirected
-input is line-oriented and is processed sequentially.
+application-owned transcript browser or input queue during execution. TUI mode
+requires terminal stdin and stdout; there is no plain-text REPL fallback.
 
 Tool progress is UTF-8 text, not a terminal emulation protocol. Newlines are
 preserved, tabs are displayed as spaces, and other control characters (including
@@ -76,9 +76,21 @@ scrollback before redraw because the current renderer otherwise clears it. This
 preserves output but may also retain a snapshot of the previous input/status
 area. There is no application-level reflow of already published scrollback.
 
-The plain-input reader is process-scoped. If stdin is blocked when the interface
-exits, that reader holds no kernel or output capability and is reclaimed at
-process exit; shutdown does not wait for another external input line.
+## One-shot CLI
+
+`chat` runs a single user turn in a fresh in-memory session. It has no session
+resume, JSON output, progress option, or CLI-specific model/tool overrides;
+configuration supplies the same runtime settings as the TUI. `chat -` buffers
+all UTF-8 stdin until EOF as one prompt, without a size limit. Empty prompts are
+rejected. The former implicit line-by-line pipe conversation has been removed.
+
+Only final text is printed to stdout, without terminal escaping; a missing final
+newline is added. Step-limit text may be partial and is accompanied by a nonzero
+exit and stderr diagnostic. Agent completion does not promise that every tool
+succeeded: tool errors can be model-visible results from which the agent recovers.
+SIGINT during execution requests shutdown and returns 130 after accepted work
+finishes; it does not cancel that work. Before kernel startup, stdin reads retain
+the normal process-level interrupt behavior.
 
 ## Other deliberately absent features
 

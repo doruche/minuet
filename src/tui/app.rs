@@ -1,8 +1,4 @@
-use std::{
-    future::Future,
-    io::{self, BufRead},
-    pin::Pin,
-};
+use std::{future::Future, io, pin::Pin};
 
 use crossterm::event::{self, Event};
 use minuet::{
@@ -26,57 +22,14 @@ enum Reply {
 }
 type Request = Pin<Box<dyn Future<Output = Result<Reply, KernelError>>>>;
 
-enum UserInput {
-    Terminal,
-    Lines(mpsc::Receiver<io::Result<String>>),
-}
-
-enum InputEvent {
-    Terminal(Event),
-    Line(String),
-}
-
-impl UserInput {
-    fn new(interactive: bool) -> io::Result<Self> {
-        if interactive {
-            return Ok(Self::Terminal);
+async fn next_event() -> io::Result<Event> {
+    loop {
+        // Inline rendering also reads cursor-position replies. Keep all reads
+        // on this interaction task so another reader cannot steal those replies.
+        if event::poll(std::time::Duration::ZERO)? {
+            return event::read();
         }
-        let (sender, receiver) = mpsc::channel(1);
-        // Blocking pipe/console reads cannot be cancelled portably. Keep this
-        // process-lifetime reader outside Tokio's blocking pool so runtime
-        // teardown never joins a read waiting for external input. It owns only
-        // stdin and this bounded sender; after TUI exit a blocked read is
-        // reclaimed at process exit, and a completed read observes disconnect.
-        std::thread::Builder::new()
-            .name("minuet-stdin".into())
-            .spawn(move || {
-                for line in io::stdin().lock().lines() {
-                    let failed = line.is_err();
-                    if sender.blocking_send(line).is_err() || failed {
-                        break;
-                    }
-                }
-            })?;
-        Ok(Self::Lines(receiver))
-    }
-
-    async fn next(&mut self) -> io::Result<Option<InputEvent>> {
-        match self {
-            Self::Terminal => loop {
-                // Ratatui's inline operations also read cursor-position replies.
-                // Poll only on this interaction task, never through a competing
-                // EventStream/background reader that can consume those replies.
-                if event::poll(std::time::Duration::ZERO)? {
-                    break event::read().map(|event| Some(InputEvent::Terminal(event)));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            },
-            Self::Lines(lines) => lines
-                .recv()
-                .await
-                .transpose()
-                .map(|line| line.map(InputEvent::Line)),
-        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
@@ -88,8 +41,6 @@ pub async fn run(kernel: KernelHandle) -> io::Result<()> {
 }
 
 async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
-    let interactive = screen.interactive();
-    let mut source = UserInput::new(interactive)?;
     let mut input = Input::default();
     let mut request: Option<Request> = None;
     let mut events: Option<mpsc::Receiver<RunEvent>> = None;
@@ -98,9 +49,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
     let mut status = String::new();
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
-    if interactive {
-        screen.line("Minuet — /help for commands", Tone::Meta)?;
-    }
+    screen.line("Minuet — /help for commands", Tone::Meta)?;
 
     loop {
         screen.draw(&input, &status, request.is_some())?;
@@ -111,12 +60,8 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                 screen.line("Exiting; waiting for shutdown.", Tone::Meta)?;
                 return Ok(());
             },
-            incoming = source.next(), if interactive || request.is_none() => {
-                let Some(incoming) = incoming? else { return Ok(()); };
-                let action = match incoming {
-                    InputEvent::Terminal(event) => input.handle(event, request.is_some()),
-                    InputEvent::Line(line) => Action::Submit(line),
-                };
+            incoming = next_event() => {
+                let action = input.handle(incoming?, request.is_some());
                 match action {
                     Action::Exit => {
                         screen.line("Exiting; waiting for shutdown.", Tone::Meta)?;
@@ -124,7 +69,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                     },
                     Action::Edit => {},
                     Action::Submit(line) => {
-                        if interactive && !line.trim().is_empty() {
+                        if !line.trim().is_empty() {
                             screen.line(&format!("> {line}"), Tone::User)?;
                         }
                         match command::parse(&line) {

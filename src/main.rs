@@ -1,6 +1,7 @@
+mod cli;
 mod tui;
 
-use std::{error::Error, sync::Arc};
+use std::{error::Error, process::ExitCode, sync::Arc};
 
 use minuet::{
     agent_loop::ReactLoop,
@@ -12,15 +13,26 @@ use minuet::{
     tool::ToolRegistry,
 };
 
-#[tokio::main]
-async fn main() {
-    if let Err(error) = run().await {
-        eprintln!("minuet: {error}");
-        std::process::exit(1);
+fn main() -> ExitCode {
+    let result = (|| {
+        let invocation = cli::parse()?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(run(invocation))
+    })();
+    match result {
+        Ok(exit) => exit,
+        Err(error) => report(error),
     }
 }
 
-async fn run() -> Result<(), Box<dyn Error>> {
+fn report(error: impl std::fmt::Display) -> ExitCode {
+    eprintln!("minuet: {error}");
+    ExitCode::FAILURE
+}
+
+async fn run(invocation: cli::Invocation) -> Result<ExitCode, Box<dyn Error>> {
     let config = Config::load()?;
     let backend: Arc<dyn InferenceBackend> = match config.provider.protocol {
         Protocol::OpenAiResponses => Arc::new(OpenAiResponsesBackend::new(
@@ -43,9 +55,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
             default_reasoning_effort: config.default_reasoning_effort,
         },
     )?;
-    let tui_result = tui::run(running.handle()).await;
+    let frontend_result = match invocation {
+        cli::Invocation::Tui => tui::run(running.handle())
+            .await
+            .map(|()| ExitCode::SUCCESS)
+            .map_err(Into::into),
+        cli::Invocation::Chat(prompt) => cli::chat::run(running.handle(), prompt).await,
+    };
+    // Every frontend result, including output failure and interruption, passes
+    // through the same join. Report both errors if frontend and shutdown fail.
     let shutdown_result = running.shutdown().await;
-    tui_result?;
-    shutdown_result?;
-    Ok(())
+    let exit = match frontend_result {
+        Ok(exit) => exit,
+        Err(error) => report(error),
+    };
+    Ok(match shutdown_result {
+        Ok(()) => exit,
+        Err(error) => report(error),
+    })
 }

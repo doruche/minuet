@@ -29,9 +29,13 @@ impl Tone {
         }
         match self {
             Self::Text => Style::default(),
-            Self::Meta => Style::default().fg(Color::DarkGray),
+            Self::Meta => Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
             Self::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            Self::User => Style::default().fg(Color::LightBlue),
+            Self::User => Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
         }
     }
 }

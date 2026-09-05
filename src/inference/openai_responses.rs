@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::{
     Client, StatusCode, Url,
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
@@ -67,6 +68,96 @@ impl OpenAiResponsesBackend {
         }
         Ok(value)
     }
+
+    async fn stream(
+        &self,
+        body: &Value,
+        observer: Option<&dyn super::InferenceObserver>,
+    ) -> Result<Value, OpenAiResponsesBackendError> {
+        let response = self
+            .client
+            .post(self.responses_url.clone())
+            .json(body)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let bytes = response.bytes().await?;
+            let value: Value = serde_json::from_slice(&bytes).map_err(|source| {
+                OpenAiResponsesBackendError::InvalidJson {
+                    status,
+                    source,
+                    body: lossy_body(&bytes),
+                }
+            })?;
+            return Err(OpenAiResponsesBackendError::Upstream {
+                status,
+                message: upstream_message(&value),
+            });
+        }
+        let mut bytes = response.bytes_stream();
+        let mut pending = Vec::new();
+        let mut data = String::new();
+        let mut completed = None;
+        while let Some(chunk) = bytes.next().await {
+            let chunk = chunk?;
+            pending.extend_from_slice(&chunk);
+            while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+                let line =
+                    String::from_utf8(pending.drain(..=newline).collect()).map_err(|_| {
+                        OpenAiResponsesBackendError::MalformedStream("stream was not UTF-8")
+                    })?;
+                let line = line.trim_end_matches(['\r', '\n']).to_owned();
+                if line.is_empty() {
+                    if !data.is_empty() {
+                        let event = parse_stream_event(&data)?;
+                        if let Some(value) = event {
+                            if value.get("type").and_then(Value::as_str)
+                                == Some("response.output_text.delta")
+                            {
+                                if let Some(text) = value.get("delta").and_then(Value::as_str) {
+                                    if let Some(observer) = observer {
+                                        observer.text_delta(text).await;
+                                    }
+                                }
+                            }
+                            match value.get("type").and_then(Value::as_str) {
+                                Some("response.completed") => {
+                                    completed = value.get("response").cloned();
+                                },
+                                Some("response.failed") | Some("response.incomplete") => {
+                                    let response = value.get("response").unwrap_or(&value);
+                                    return Err(OpenAiResponsesBackendError::StreamTerminal(
+                                        upstream_message(response),
+                                    ));
+                                },
+                                Some("error") => {
+                                    return Err(OpenAiResponsesBackendError::StreamTerminal(
+                                        upstream_message(&value),
+                                    ));
+                                },
+                                _ => {},
+                            }
+                        }
+                        data.clear();
+                    }
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    let value = value.strip_prefix(' ').unwrap_or(value);
+                    if value != "[DONE]" {
+                        data.push_str(value);
+                    }
+                }
+            }
+        }
+        if !pending.is_empty() || !data.is_empty() {
+            return Err(OpenAiResponsesBackendError::MalformedStream(
+                "stream ended before an SSE event boundary",
+            ));
+        }
+        completed.ok_or(OpenAiResponsesBackendError::MalformedStream(
+            "stream ended without response.completed",
+        ))
+    }
 }
 
 #[async_trait]
@@ -76,7 +167,7 @@ impl InferenceBackend for OpenAiResponsesBackend {
         request: InferenceRequest<'_>,
     ) -> Result<InferenceResponse, InferenceError> {
         let body = create_request(&request, true);
-        let response = self.post(self.responses_url.clone(), &body).await?;
+        let response = self.stream(&body, request.observer).await?;
         parse_response(response).map_err(Into::into)
     }
 
@@ -111,7 +202,7 @@ fn create_request(request: &InferenceRequest<'_>, generation: bool) -> Value {
         body.insert("reasoning".to_owned(), json!({ "effort": effort.as_str() }));
     }
     if generation {
-        body.insert("stream".to_owned(), Value::Bool(false));
+        body.insert("stream".to_owned(), Value::Bool(true));
         body.insert("store".to_owned(), Value::Bool(false));
         // Stateless OpenAI reasoning turns need this opaque continuation data.
         // Compatible providers may omit it from their response, in which case
@@ -183,15 +274,25 @@ fn parse_output_item(value: Value) -> Result<ModelOutputItem, OpenAiResponsesBac
         .unwrap_or_default();
     let effect = match item_type {
         "message" => {
+            value.get("content").and_then(Value::as_array).ok_or(
+                OpenAiResponsesBackendError::MalformedResponse("message content"),
+            )?;
             let text = value
                 .get("content")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
                 .filter(|content| {
                     content.get("type").and_then(Value::as_str) == Some("output_text")
                 })
-                .filter_map(|content| content.get("text").and_then(Value::as_str))
+                .map(|content| {
+                    content.get("text").and_then(Value::as_str).ok_or(
+                        OpenAiResponsesBackendError::MalformedResponse("output_text text"),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
                 .collect::<String>();
             if text.is_empty() {
                 OutputEffect::None
@@ -275,6 +376,16 @@ pub enum OpenAiResponsesBackendError {
     Incomplete(String),
     #[error("malformed upstream response: {0}")]
     MalformedResponse(&'static str),
+    #[error("malformed streaming response: {0}")]
+    MalformedStream(&'static str),
+    #[error("stream ended with an upstream error: {0}")]
+    StreamTerminal(String),
+}
+
+fn parse_stream_event(data: &str) -> Result<Option<Value>, OpenAiResponsesBackendError> {
+    serde_json::from_str(data)
+        .map(Some)
+        .map_err(|_| OpenAiResponsesBackendError::MalformedStream("invalid SSE JSON"))
 }
 
 #[cfg(test)]
@@ -299,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_request_is_stateless_and_non_streaming() {
+    fn generation_request_is_stateless_and_streaming() {
         let items = [ConversationItem::UserText("hello".to_owned())];
         let tools = [definition()];
         let effort = ReasoningEffort::new("vendor-special").unwrap();
@@ -308,10 +419,11 @@ mod tests {
             input: &items,
             tools: &tools,
             reasoning_effort: Some(&effort),
+            observer: None,
         };
 
         let body = create_request(&request, true);
-        assert_eq!(body["stream"], false);
+        assert_eq!(body["stream"], true);
         assert_eq!(body["store"], false);
         assert_eq!(body["truncation"], "disabled");
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
@@ -327,6 +439,7 @@ mod tests {
             input: &items,
             tools: &[],
             reasoning_effort: None,
+            observer: None,
         };
 
         let body = create_request(&request, false);
@@ -370,6 +483,7 @@ mod tests {
             input: &items,
             tools: &[],
             reasoning_effort: None,
+            observer: None,
         };
 
         let body = create_request(&request, true);

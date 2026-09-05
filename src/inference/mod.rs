@@ -99,6 +99,12 @@ pub struct InferenceRequest<'a> {
     pub input: &'a [ConversationItem],
     pub tools: &'a [ToolDefinition],
     pub reasoning_effort: Option<&'a ReasoningEffort>,
+    pub observer: Option<&'a dyn InferenceObserver>,
+}
+
+#[async_trait]
+pub trait InferenceObserver: Send + Sync {
+    async fn text_delta(&self, text: &str);
 }
 
 #[async_trait]

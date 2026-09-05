@@ -153,6 +153,7 @@ pub fn draw(
     input: &InputLayout,
     status: Option<Status<'_>>,
     tail: &OutputTail,
+    preview: &str,
     colors: bool,
     shift_enter: bool,
 ) {
@@ -171,7 +172,12 @@ pub fn draw(
         areas[0].height,
     );
     frame.render_widget(
-        Paragraph::new(tail.text.as_str()).style(tail.tone.style(colors)),
+        Paragraph::new(if preview.is_empty() {
+            tail.text.as_str()
+        } else {
+            preview
+        })
+        .style(tail.tone.style(colors)),
         output_area,
     );
     if let Some(status) = status {
@@ -243,6 +249,7 @@ mod tests {
                             elapsed: std::time::Duration::from_secs(seconds),
                         }),
                         &tail,
+                        "",
                         false,
                         false,
                     );

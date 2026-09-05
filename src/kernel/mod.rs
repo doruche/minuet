@@ -182,6 +182,7 @@ impl KernelTask {
             input: &prepared_input,
             tools: &definitions,
             reasoning_effort: snapshot.reasoning_effort.as_ref(),
+            observer: None,
         };
         let input_tokens = match self.backend.count_input_tokens(request).await {
             Ok(tokens) => InputTokenCount::Available(tokens),
@@ -626,10 +627,18 @@ mod tests {
     }
 
     async fn event(receiver: &mut mpsc::Receiver<RunEvent>) -> RunEvent {
-        tokio::time::timeout(std::time::Duration::from_secs(3), receiver.recv())
-            .await
-            .expect("event stalled")
-            .expect("event stream closed")
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(3), receiver.recv())
+                .await
+                .expect("event stalled")
+                .expect("event stream closed");
+            if !matches!(
+                event,
+                RunEvent::ModelTextDelta { .. } | RunEvent::ModelTurnCommitted { .. }
+            ) {
+                return event;
+            }
+        }
     }
 
     #[tokio::test]
@@ -682,6 +691,10 @@ mod tests {
             RunEvent::InferenceStarted
         ));
         assert_eq!(run.await.unwrap().unwrap().text, "answer");
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RunEvent::ModelTurnCommitted { text, .. }) if text == "answer"
+        ));
         assert!(receiver.recv().await.is_none());
         {
             let seen = backend.seen_inputs.lock().unwrap();

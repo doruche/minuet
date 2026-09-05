@@ -185,6 +185,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                         }
                     },
                     Reply::Run(Err(error)) => {
+                        screen.model_failed();
                         screen.line(&format!("error: {error}"), Tone::Error)?;
                         screen.line(&format!("Failed · {elapsed}"), Tone::Error)?;
                     },
@@ -200,6 +201,14 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
 fn progress(screen: &mut Screen, status: &mut String, event: RunEvent) -> io::Result<()> {
     match event {
         RunEvent::InferenceStarted => *status = "Waiting for model…".into(),
+        RunEvent::ModelTextDelta { text } => screen.model_delta(&text),
+        RunEvent::ModelTurnCommitted {
+            text,
+            has_tool_calls,
+        } => {
+            screen.model_commit(&text, has_tool_calls)?;
+            *status = "Continuing…".into();
+        },
         RunEvent::ToolStarted { name, .. } => {
             *status = format!("Running {name}…");
             screen.line(&format!("Running {name}"), Tone::Meta)?;

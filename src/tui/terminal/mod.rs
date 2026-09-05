@@ -32,6 +32,7 @@ pub struct Screen {
     terminal: Terminal<InlineBackend>,
     mode: TerminalMode,
     tail: OutputTail,
+    preview: String,
     colors: bool,
 }
 
@@ -112,6 +113,7 @@ impl Screen {
             terminal,
             mode,
             tail: OutputTail::default(),
+            preview: String::new(),
             colors,
         })
     }
@@ -135,6 +137,7 @@ impl Screen {
     }
 
     pub fn markdown(&mut self, source: &str) -> io::Result<()> {
+        self.preview.clear();
         self.end_line()?;
         self.terminal.autoresize()?;
         let area = self.terminal.get_frame().area();
@@ -235,9 +238,36 @@ impl Screen {
         }
         let shift_enter = cfg!(windows) || self.mode.keyboard_enhanced;
         self.terminal.draw(|frame| {
-            render::draw(frame, &layout, status, &self.tail, self.colors, shift_enter)
+            render::draw(
+                frame,
+                &layout,
+                status,
+                &self.tail,
+                &self.preview,
+                self.colors,
+                shift_enter,
+            )
         })?;
         Ok(())
+    }
+
+    pub fn model_delta(&mut self, text: &str) {
+        self.preview.push_str(&render::safe_text(text));
+    }
+
+    pub fn model_commit(&mut self, text: &str, publish: bool) -> io::Result<()> {
+        self.preview.clear();
+        if publish && !text.is_empty() {
+            self.markdown(text)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn model_failed(&mut self) {
+        if !self.preview.is_empty() {
+            self.preview.push_str("\n\n[response incomplete]");
+        }
     }
 
     fn append(&mut self, text: &str) -> io::Result<()> {

@@ -190,8 +190,20 @@ api_key_env = "MINUET_CLI_TEST_KEY"
 }
 
 fn respond(mut socket: TcpStream, status: &str, body: Value) {
-    let body = body.to_string();
-    write!(socket, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    let body = if status.starts_with('2') {
+        format!(
+            "data: {}\n\n",
+            json!({"type":"response.completed", "response":body})
+        )
+    } else {
+        body.to_string()
+    };
+    let content_type = if status.starts_with('2') {
+        "text/event-stream"
+    } else {
+        "application/json"
+    };
+    write!(socket, "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
 }
 
 fn answer(text: &str) -> Value {

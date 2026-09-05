@@ -3,7 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::tool::ToolOutput;
+use crate::{inference::InferenceObserver, tool::ToolOutput};
 
 use super::ToolActivity;
 
@@ -14,6 +14,13 @@ use super::ToolActivity;
 #[derive(Clone, Debug)]
 pub enum RunEvent {
     InferenceStarted,
+    ModelTextDelta {
+        text: String,
+    },
+    ModelTurnCommitted {
+        text: String,
+        has_tool_calls: bool,
+    },
     ToolStarted {
         call_id: String,
         name: String,
@@ -45,6 +52,16 @@ impl RunEvents {
             events: self,
             call_id,
         }
+    }
+}
+
+#[async_trait]
+impl InferenceObserver for RunEvents {
+    async fn text_delta(&self, text: &str) {
+        self.send(RunEvent::ModelTextDelta {
+            text: text.to_owned(),
+        })
+        .await;
     }
 }
 

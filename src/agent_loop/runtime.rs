@@ -89,6 +89,7 @@ impl<'a> LoopContext<'a> {
                 input: &prepared_input,
                 tools: &self.definitions,
                 reasoning_effort: self.reasoning_effort.as_ref(),
+                observer: Some(&self.events),
             })
             .await?;
 
@@ -110,6 +111,12 @@ impl<'a> LoopContext<'a> {
         self.store
             .commit_inference(self.session_id, &output_items, usage)?;
         self.input.extend(output_items);
+        self.events
+            .send(RunEvent::ModelTurnCommitted {
+                text: text.clone(),
+                has_tool_calls: !tool_calls.is_empty(),
+            })
+            .await;
         Ok(CommittedModelTurn {
             tool_calls: PendingToolRound { calls: tool_calls },
             text,

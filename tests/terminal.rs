@@ -96,8 +96,11 @@ fn backend(directory: PathBuf) -> (OpenAiResponsesBackend, std::thread::JoinHand
             while directory.join(format!("hold-response-{index}")).exists() {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            let body = response.to_string();
-            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let body = format!(
+                "data: {}\n\n",
+                json!({"type":"response.completed", "response":response})
+            );
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         }
     });
     (

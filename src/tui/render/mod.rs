@@ -202,4 +202,19 @@ mod tests {
     fn renders_controls_as_text() {
         assert_eq!(safe_text("a\x1b[2J\r\nb\t"), "a\\u{1b}[2J\\r\nb    ");
     }
+
+    #[test]
+    fn markdown_produces_styled_blocks() {
+        let text = tui_markdown::from_str("# Title\n\n**bold** and `code`");
+        assert!(text.lines.len() >= 2);
+        let rendered = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("Title"));
+        assert!(rendered.contains("bold"));
+        assert!(rendered.contains("code"));
+    }
 }

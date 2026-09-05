@@ -52,3 +52,23 @@ any successful call omitted usage. Minuet does not store a context-window size.
 The user-visible and operational limits of this implementation are maintained
 in [`current-limitations.md`](current-limitations.md). Keeping that list in one
 place avoids treating a transient module shape as a product guarantee.
+
+## Run observation
+
+`KernelHandle::run_with_events` executes through the same sequencer as `run`
+while publishing ordered progress to a caller-owned bounded channel. The caller
+must consume progress concurrently with awaiting the result. Detaching either
+observer or result does not cancel accepted execution; a closed observer releases
+blocked sends and disables further delivery.
+
+The runtime owns inference and tool-call lifecycle events. A tool borrows only a
+`ToolOutput` capability for execution-time UTF-8 fragments. It cannot fabricate
+completion events or retain the capability beyond its invocation. Writes apply
+backpressure and preserve text without adding newlines; large writes are split
+at UTF-8 boundaries. Progress text is presentation data, not session history.
+The tool's final return value remains the sole source of its committed result.
+
+A `ToolFinished` event reports execution (or an explicit skip), not successful
+session commit or overall run success. Later commit or inference failures remain
+observable through the run's returned error. `RunOutcome` retains its immutable
+summary for callers that do not need live observation.

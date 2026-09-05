@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::{
     context::ContextStrategy,
     inference::{ConversationItem, InferenceBackend, InferenceRequest, OutputEffect, ToolCall},
@@ -7,7 +9,7 @@ use crate::{
 };
 
 use super::{CommittedModelTurn, CommittedToolRound, LoopError, ToolActivity};
-use super::{PendingToolRound, ToolActivityStatus};
+use super::{PendingToolRound, RunEvent, ToolActivityStatus, events::RunEvents};
 
 const STEP_LIMIT_OUTPUT: &str =
     "tool call was not executed because the run reached its model-turn limit";
@@ -16,6 +18,7 @@ const STEP_LIMIT_OUTPUT: &str =
 /// session commit ordering and tool visibility while leaving the loop in
 /// control of when inference and tool rounds occur.
 pub struct LoopContext<'a> {
+    events: RunEvents,
     backend: &'a dyn InferenceBackend,
     context: &'a dyn ContextStrategy,
     store: &'a mut dyn SessionStore,
@@ -34,6 +37,10 @@ pub struct LoopContext<'a> {
 }
 
 impl<'a> LoopContext<'a> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit borrowed owner capabilities and run input"
+    )]
     pub(crate) fn new(
         backend: &'a dyn InferenceBackend,
         context: &'a dyn ContextStrategy,
@@ -42,6 +49,7 @@ impl<'a> LoopContext<'a> {
         session_id: SessionId,
         model: &'a str,
         prompt: String,
+        events: RunEvents,
     ) -> Result<Self, LoopError> {
         if prompt.trim().is_empty() {
             return Err(LoopError::EmptyPrompt);
@@ -58,6 +66,7 @@ impl<'a> LoopContext<'a> {
         let definitions = tools.definitions();
 
         Ok(Self {
+            events,
             backend,
             context,
             store,
@@ -71,6 +80,7 @@ impl<'a> LoopContext<'a> {
     }
 
     pub async fn infer_and_commit(&mut self) -> Result<CommittedModelTurn, LoopError> {
+        self.events.send(RunEvent::InferenceStarted).await;
         let prepared_input = self.context.prepare(&self.input);
         let response = self
             .backend
@@ -114,12 +124,17 @@ impl<'a> LoopContext<'a> {
         self.commit_tool_calls(pending.calls).await
     }
 
-    pub fn skip_and_commit(
+    pub async fn skip_and_commit(
         &mut self,
         pending: PendingToolRound,
     ) -> Result<CommittedToolRound, LoopError> {
         let mut results = Vec::with_capacity(pending.calls.len());
         let mut activities = Vec::with_capacity(pending.calls.len());
+        let call_ids: Vec<_> = pending
+            .calls
+            .iter()
+            .map(|call| call.call_id.clone())
+            .collect();
         for call in pending.calls {
             results.push(ConversationItem::FunctionCallOutput {
                 call_id: call.call_id,
@@ -139,6 +154,15 @@ impl<'a> LoopContext<'a> {
         }
         self.store.append(self.session_id, &results)?;
         self.input.extend(results);
+        for (call_id, activity) in call_ids.into_iter().zip(&activities) {
+            self.events
+                .send(RunEvent::ToolFinished {
+                    call_id,
+                    activity: activity.clone(),
+                    elapsed: Duration::ZERO,
+                })
+                .await;
+        }
         Ok(CommittedToolRound { activities })
     }
 
@@ -149,12 +173,25 @@ impl<'a> LoopContext<'a> {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut activities = Vec::with_capacity(tool_calls.len());
         for call in tool_calls {
-            let invocation = self.tools.invoke(&call.name, &call.arguments).await;
+            self.events
+                .send(RunEvent::ToolStarted {
+                    call_id: call.call_id.clone(),
+                    name: call.name.clone(),
+                })
+                .await;
+            let started = Instant::now();
+            let invocation = {
+                let output = self.events.tool_output(&call.call_id);
+                self.tools
+                    .invoke(&call.name, &call.arguments, &output)
+                    .await
+            };
+            let elapsed = started.elapsed();
             results.push(ConversationItem::FunctionCallOutput {
-                call_id: call.call_id,
+                call_id: call.call_id.clone(),
                 output: invocation.output.clone(),
             });
-            activities.push(ToolActivity {
+            let activity = ToolActivity {
                 name: call.name,
                 output: invocation.output,
                 status: if invocation.is_error {
@@ -162,7 +199,15 @@ impl<'a> LoopContext<'a> {
                 } else {
                     ToolActivityStatus::Completed
                 },
-            });
+            };
+            self.events
+                .send(RunEvent::ToolFinished {
+                    call_id: call.call_id,
+                    activity: activity.clone(),
+                    elapsed,
+                })
+                .await;
+            activities.push(activity);
         }
         self.store.append(self.session_id, &results)?;
         self.input.extend(results);

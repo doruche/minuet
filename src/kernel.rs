@@ -7,7 +7,7 @@ use tokio::{
 };
 
 use crate::{
-    agent_loop::{AgentLoop, LoopContext, LoopError, RunOutcome},
+    agent_loop::{AgentLoop, LoopContext, LoopError, RunEvent, RunOutcome},
     context::ContextStrategy,
     inference::{InferenceBackend, InferenceRequest},
     model::{IdentifierError, ModelSelection, ReasoningEffort},
@@ -68,6 +68,23 @@ impl KernelHandle {
     pub async fn run(&self, prompt: impl Into<String>) -> Result<RunOutcome, KernelError> {
         self.request(|reply| Command::Run {
             prompt: prompt.into(),
+            events: None,
+            reply,
+        })
+        .await
+    }
+
+    /// Runs through the same command sequencer while publishing ordered progress.
+    /// The caller must drain the bounded channel concurrently with this future.
+    /// Dropping either receiver or result does not cancel an accepted run.
+    pub async fn run_with_events(
+        &self,
+        prompt: impl Into<String>,
+        events: mpsc::Sender<RunEvent>,
+    ) -> Result<RunOutcome, KernelError> {
+        self.request(|reply| Command::Run {
+            prompt: prompt.into(),
+            events: Some(events),
             reply,
         })
         .await
@@ -160,8 +177,12 @@ impl KernelTask {
     async fn run(mut self) {
         while let Some(command) = self.receiver.recv().await {
             match command {
-                Command::Run { prompt, reply } => {
-                    let result = self.run_loop(prompt).await;
+                Command::Run {
+                    prompt,
+                    events,
+                    reply,
+                } => {
+                    let result = self.run_loop(prompt, events).await;
                     let _ = reply.send(result);
                 },
                 Command::NewSession { reply } => {
@@ -238,7 +259,11 @@ impl KernelTask {
         })
     }
 
-    async fn run_loop(&mut self, prompt: String) -> Result<RunOutcome, KernelError> {
+    async fn run_loop(
+        &mut self,
+        prompt: String,
+        events: Option<mpsc::Sender<RunEvent>>,
+    ) -> Result<RunOutcome, KernelError> {
         let agent_loop = Arc::clone(&self.agent_loop);
         let mut context = LoopContext::new(
             self.backend.as_ref(),
@@ -248,6 +273,7 @@ impl KernelTask {
             self.active_session,
             self.model.model.as_str(),
             prompt,
+            crate::agent_loop::RunEvents(events),
         )?;
         agent_loop.run(&mut context).await.map_err(Into::into)
     }
@@ -256,6 +282,7 @@ impl KernelTask {
 enum Command {
     Run {
         prompt: String,
+        events: Option<mpsc::Sender<RunEvent>>,
         reply: oneshot::Sender<Result<RunOutcome, KernelError>>,
     },
     NewSession {
@@ -591,5 +618,205 @@ mod tests {
             }));
         }
         running.shutdown().await.unwrap();
+    }
+
+    struct StreamingTool {
+        release: Arc<tokio::sync::Notify>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl crate::tool::Tool for StreamingTool {
+        fn definition(&self) -> crate::tool::ToolDefinition {
+            crate::tool::ToolDefinition {
+                name: "stream".into(),
+                description: "test stream".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+            output: &dyn crate::tool::ToolOutput,
+        ) -> Result<serde_json::Value, crate::tool::ToolError> {
+            output.write("开始").await;
+            self.release.notified().await;
+            output.write(&"中".repeat(5000)).await;
+            output.write("完成\n").await;
+            if self.fail {
+                Err(crate::tool::ToolError::InvalidArguments(
+                    "failed after output".into(),
+                ))
+            } else {
+                Ok(json!({"result": "final result only"}))
+            }
+        }
+    }
+
+    fn streaming_kernel(
+        fail: bool,
+        followup: bool,
+    ) -> (
+        RunningKernel,
+        Arc<ScriptedBackend>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let mut responses = VecDeque::from([InferenceResponse {
+            output: vec![output(OutputEffect::ToolCall(ToolCall {
+                call_id: "stream-call".into(),
+                name: "stream".into(),
+                arguments: "{}".into(),
+            }))],
+            usage: None,
+        }]);
+        if followup {
+            responses.push_back(InferenceResponse {
+                output: vec![output(OutputEffect::Text("answer".into()))],
+                usage: None,
+            });
+        }
+        let backend = Arc::new(ScriptedBackend {
+            responses: Mutex::new(responses),
+            seen_inputs: Mutex::new(Vec::new()),
+            input_tokens: 0,
+        });
+        let release = Arc::new(tokio::sync::Notify::new());
+        let tools = ToolRegistry::new(
+            [Arc::new(StreamingTool {
+                release: release.clone(),
+                fail,
+            }) as Arc<dyn crate::tool::Tool>],
+            &["stream".into()],
+        )
+        .unwrap();
+        let running = start(
+            KernelComponents {
+                backend: backend.clone(),
+                tools,
+                store: Box::new(MemorySessionStore::default()),
+                agent_loop: Arc::new(ReactLoop::new(4).unwrap()),
+                context: Arc::new(FullContext),
+            },
+            options(),
+        )
+        .unwrap();
+        (running, backend, release)
+    }
+
+    async fn event(receiver: &mut mpsc::Receiver<RunEvent>) -> RunEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(3), receiver.recv())
+            .await
+            .expect("event stalled")
+            .expect("event stream closed")
+    }
+
+    #[tokio::test]
+    async fn delivers_fragments_before_return_and_commits_only_the_final_result() {
+        let (running, backend, release) = streaming_kernel(false, true);
+        let handle = running.handle();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let run = tokio::spawn(async move { handle.run_with_events("stream", sender).await });
+        assert!(matches!(
+            event(&mut receiver).await,
+            RunEvent::InferenceStarted
+        ));
+        assert!(
+            matches!(event(&mut receiver).await, RunEvent::ToolStarted { call_id, name }
+            if call_id == "stream-call" && name == "stream")
+        );
+        assert!(
+            matches!(event(&mut receiver).await, RunEvent::ToolOutput { call_id, text }
+            if call_id == "stream-call" && text == "开始")
+        );
+        // This is a gate, not a timing assumption: the tool cannot return until
+        // the observer has actually received its first unterminated fragment.
+        assert!(!run.is_finished());
+        release.notify_one();
+        let mut streamed = String::new();
+        loop {
+            match event(&mut receiver).await {
+                RunEvent::ToolOutput { call_id, text } => {
+                    assert_eq!(call_id, "stream-call");
+                    assert!(text.len() <= 4096);
+                    streamed.push_str(&text);
+                },
+                RunEvent::ToolFinished { activity, .. } => {
+                    assert_eq!(
+                        activity.status,
+                        crate::agent_loop::ToolActivityStatus::Completed
+                    );
+                    assert_eq!(activity.output, r#"{"result":"final result only"}"#);
+                    break;
+                },
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert_eq!(streamed, format!("{}完成\n", "中".repeat(5000)));
+        assert!(matches!(
+            event(&mut receiver).await,
+            RunEvent::InferenceStarted
+        ));
+        assert_eq!(run.await.unwrap().unwrap().text, "answer");
+        assert!(receiver.recv().await.is_none());
+        {
+            let seen = backend.seen_inputs.lock().unwrap();
+            assert!(
+                matches!(seen[1].last(), Some(ConversationItem::FunctionCallOutput { output, .. })
+                if output == r#"{"result":"final result only"}"#)
+            );
+        }
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn partial_output_and_tool_error_remain_observable_if_later_inference_fails() {
+        let (running, _, release) = streaming_kernel(true, false);
+        let handle = running.handle();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let run = tokio::spawn(async move { handle.run_with_events("stream", sender).await });
+        event(&mut receiver).await;
+        event(&mut receiver).await;
+        assert!(matches!(
+            event(&mut receiver).await,
+            RunEvent::ToolOutput { .. }
+        ));
+        release.notify_one();
+        let mut saw_failure = false;
+        while let Some(event) = receiver.recv().await {
+            if let RunEvent::ToolFinished { activity, .. } = event {
+                assert_eq!(
+                    activity.status,
+                    crate::agent_loop::ToolActivityStatus::Error
+                );
+                assert!(activity.output.contains("failed after output"));
+                saw_failure = true;
+            }
+        }
+        assert!(saw_failure);
+        assert!(run.await.unwrap().is_err());
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detaching_observer_and_result_allows_execution_and_shutdown_to_finish() {
+        let (running, backend, release) = streaming_kernel(false, true);
+        let handle = running.handle();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let run = tokio::spawn(async move { handle.run_with_events("stream", sender).await });
+        event(&mut receiver).await;
+        event(&mut receiver).await;
+        event(&mut receiver).await;
+        // Drop the caller's wait, not the kernel-owned execution. The next write
+        // spans several queue slots, proving a closed observer cannot block it.
+        run.abort();
+        assert!(run.await.unwrap_err().is_cancelled());
+        drop(receiver);
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(3), running.shutdown())
+            .await
+            .expect("shutdown blocked on detached observer")
+            .unwrap();
+        assert_eq!(backend.seen_inputs.lock().unwrap().len(), 2);
     }
 }

@@ -7,6 +7,9 @@ use thiserror::Error;
 mod builtins;
 mod current_datetime;
 mod echo;
+mod output;
+
+pub use output::ToolOutput;
 mod random_integer;
 
 #[derive(Clone, Debug)]
@@ -20,7 +23,7 @@ pub struct ToolDefinition {
 pub trait Tool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
 
-    async fn invoke(&self, arguments: Value) -> Result<Value, ToolError>;
+    async fn invoke(&self, arguments: Value, output: &dyn ToolOutput) -> Result<Value, ToolError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,7 +114,12 @@ impl ToolRegistry {
         Ok(())
     }
 
-    pub async fn invoke(&self, name: &str, arguments: &str) -> ToolInvocation {
+    pub async fn invoke(
+        &self,
+        name: &str,
+        arguments: &str,
+        output: &dyn ToolOutput,
+    ) -> ToolInvocation {
         let Some(registered) = self.tools.get(name) else {
             return invocation_error("unknown_tool", format!("unknown tool `{name}`"));
         };
@@ -124,7 +132,7 @@ impl ToolRegistry {
                 return invocation_error("invalid_arguments", error.to_string());
             },
         };
-        match registered.tool.invoke(arguments).await {
+        match registered.tool.invoke(arguments, output).await {
             Ok(value) => ToolInvocation {
                 output: value.to_string(),
                 is_error: false,
@@ -198,7 +206,7 @@ mod tests {
         assert_eq!(registry.definitions()[0].name, "echo");
 
         let disabled = registry
-            .invoke("random_integer", r#"{"min":1,"max":1}"#)
+            .invoke("random_integer", r#"{"min":1,"max":1}"#, &())
             .await;
         assert!(disabled.is_error);
         assert!(disabled.output.contains("disabled_tool"));
@@ -207,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn echo_returns_structured_output() {
         let registry = ToolRegistry::with_builtins(&enabled(&["echo"])).unwrap();
-        let invocation = registry.invoke("echo", r#"{"text":"hello"}"#).await;
+        let invocation = registry.invoke("echo", r#"{"text":"hello"}"#, &()).await;
         assert!(!invocation.is_error);
         assert_eq!(
             serde_json::from_str::<Value>(&invocation.output).unwrap(),
@@ -219,7 +227,7 @@ mod tests {
     async fn reports_invalid_random_ranges_to_the_model() {
         let registry = ToolRegistry::with_builtins(&enabled(&["random_integer"])).unwrap();
         let invocation = registry
-            .invoke("random_integer", r#"{"min":4,"max":2}"#)
+            .invoke("random_integer", r#"{"min":4,"max":2}"#, &())
             .await;
         assert!(invocation.is_error);
         assert!(invocation.output.contains("invalid_arguments"));

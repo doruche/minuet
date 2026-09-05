@@ -20,7 +20,11 @@ impl Tool for CurrentDatetimeTool {
         }
     }
 
-    async fn invoke(&self, arguments: Value) -> Result<Value, ToolError> {
+    async fn invoke(
+        &self,
+        arguments: Value,
+        _output: &dyn super::ToolOutput,
+    ) -> Result<Value, ToolError> {
         let arguments = arguments
             .as_object()
             .ok_or_else(|| ToolError::InvalidArguments("arguments must be an object".to_owned()))?;

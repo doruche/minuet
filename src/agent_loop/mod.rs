@@ -6,9 +6,12 @@ use crate::{
     session::{SessionStoreError, UsageSummary},
 };
 
+mod events;
 mod react;
 mod runtime;
 
+pub use events::RunEvent;
+pub(crate) use events::RunEvents;
 pub use react::ReactLoop;
 pub use runtime::LoopContext;
 

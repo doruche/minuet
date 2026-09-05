@@ -33,7 +33,11 @@ impl Tool for RandomIntegerTool {
         }
     }
 
-    async fn invoke(&self, arguments: Value) -> Result<Value, ToolError> {
+    async fn invoke(
+        &self,
+        arguments: Value,
+        _output: &dyn super::ToolOutput,
+    ) -> Result<Value, ToolError> {
         let arguments: RandomIntegerArguments = serde_json::from_value(arguments)
             .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
         if arguments.min > arguments.max {

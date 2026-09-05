@@ -35,7 +35,7 @@ impl AgentLoop for ReactLoop {
                 });
             }
             if model_turn == self.max_steps {
-                let skipped = context.skip_and_commit(turn.tool_calls)?;
+                let skipped = context.skip_and_commit(turn.tool_calls).await?;
                 activities.extend(skipped.activities);
                 return Ok(RunOutcome {
                     text: turn.text,

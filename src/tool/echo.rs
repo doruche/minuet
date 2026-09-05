@@ -27,7 +27,11 @@ impl Tool for EchoTool {
         }
     }
 
-    async fn invoke(&self, arguments: Value) -> Result<Value, ToolError> {
+    async fn invoke(
+        &self,
+        arguments: Value,
+        _output: &dyn super::ToolOutput,
+    ) -> Result<Value, ToolError> {
         let arguments: EchoArguments = serde_json::from_value(arguments)
             .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
         Ok(json!({"text": arguments.text}))

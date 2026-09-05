@@ -425,7 +425,7 @@ fn pty_compact_prompt_wraps_and_shrinks_without_cursor_or_style_residue() {
     assert_eq!(screen.cell(row, 0).unwrap().contents(), ">");
     assert_eq!(
         screen.cell(row, 0).unwrap().fgcolor(),
-        vt100::Color::Idx(12)
+        vt100::Color::Idx(14)
     );
     assert!(screen.cell(row, 0).unwrap().bold());
     assert_eq!(screen.cell(row - 1, 0).unwrap().contents(), "M");

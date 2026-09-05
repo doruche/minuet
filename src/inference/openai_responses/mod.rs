@@ -1,5 +1,6 @@
 mod wire;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -101,6 +102,7 @@ impl OpenAiResponsesBackend {
         let mut pending = Vec::new();
         let mut data = String::new();
         let mut completed = None;
+        let mut finalized_items = BTreeMap::new();
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk?;
             pending.extend_from_slice(&chunk);
@@ -142,8 +144,41 @@ impl OpenAiResponsesBackend {
                                     .map_err(|_| OpenAiResponsesBackendError::ObserverTimeout)?;
                             }
                             match value.get("type").and_then(Value::as_str) {
+                                Some("response.output_item.done") => {
+                                    let index =
+                                        value.get("output_index").and_then(Value::as_u64).ok_or(
+                                            OpenAiResponsesBackendError::MalformedResponse(
+                                                "output_index",
+                                            ),
+                                        )?;
+                                    let item = value.get("item").cloned().ok_or(
+                                        OpenAiResponsesBackendError::MalformedResponse(
+                                            "output item",
+                                        ),
+                                    )?;
+                                    if finalized_items.insert(index, item).is_some() {
+                                        return Err(OpenAiResponsesBackendError::MalformedStream(
+                                            "duplicate output item",
+                                        ));
+                                    }
+                                },
                                 Some("response.completed") => {
-                                    completed = value.get("response").cloned();
+                                    let mut response = value.get("response").cloned().ok_or(
+                                        OpenAiResponsesBackendError::MalformedResponse(
+                                            "completed response",
+                                        ),
+                                    )?;
+                                    if response
+                                        .get("output")
+                                        .and_then(Value::as_array)
+                                        .is_some_and(|output| output.is_empty())
+                                        && !finalized_items.is_empty()
+                                    {
+                                        let output =
+                                            finalized_items.values().cloned().collect::<Vec<_>>();
+                                        response["output"] = Value::Array(output);
+                                    }
+                                    completed = Some(response);
                                 },
                                 Some("response.failed") | Some("response.incomplete") => {
                                     let response = value.get("response").unwrap_or(&value);

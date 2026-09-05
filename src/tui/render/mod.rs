@@ -59,6 +59,7 @@ pub fn elapsed(duration: std::time::Duration) -> String {
 pub enum Tone {
     #[default]
     Text,
+    Command,
     Meta,
     Error,
     User,
@@ -71,6 +72,7 @@ impl Tone {
         }
         match self {
             Self::Text => Style::default(),
+            Self::Command => Style::default().fg(Color::DarkGray),
             Self::Meta => Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),

@@ -118,7 +118,10 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                         match command::parse(&line) {
                             command::Input::Empty => {},
                             command::Input::Notice { text, is_error } => {
-                                screen.line(&text, if is_error { Tone::Error } else { Tone::Text })?;
+                                screen.line(
+                                    &text,
+                                    if is_error { Tone::Error } else { Tone::Command },
+                                )?;
                             },
                             command::Input::Command(command::Command::Exit) => return Ok(()),
                             command::Input::Command(command) => {
@@ -185,7 +188,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                         screen.line(&format!("error: {error}"), Tone::Error)?;
                         screen.line(&format!("Failed · {elapsed}"), Tone::Error)?;
                     },
-                    Reply::Command(Ok(text)) => screen.line(&text, Tone::Text)?,
+                    Reply::Command(Ok(text)) => screen.line(&text, Tone::Command)?,
                     Reply::Command(Err(error)) => screen.line(&format!("error: {error}"), Tone::Error)?,
                 }
             },

@@ -216,6 +216,16 @@ impl ResponseStream {
                     detail: "started output item was not finalized",
                 });
             }
+            if self
+                .started
+                .keys()
+                .any(|index| !self.items.contains_key(index))
+            {
+                return Err(Error::OutputIntegrity {
+                    index: None,
+                    detail: "started output item was not finalized",
+                });
+            }
             return Ok(());
         }
         if output.len() > MAX_ITEMS {
@@ -375,6 +385,15 @@ mod tests {
             ])
             .is_err()
         );
+    }
+    #[test]
+    fn rejects_a_started_index_that_has_no_matching_finalized_item() {
+        let item = message("OK");
+        assert!(stream(vec![
+            json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","status":"in_progress"}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":item}),
+            json!({"type":"response.completed","response":{"status":"completed","output":[]}}),
+        ]).is_err());
     }
     #[test]
     fn preserves_tool_call_identity() {

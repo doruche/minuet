@@ -22,6 +22,13 @@ pub async fn run(kernel: KernelHandle) -> io::Result<()> {
 
         match command::parse(&line) {
             command::Input::Empty => {},
+            command::Input::Notice { text, is_error } => {
+                if is_error {
+                    eprintln!("{text}");
+                } else {
+                    println!("{text}");
+                }
+            },
             command::Input::Prompt(prompt) => match kernel.run(prompt).await {
                 Ok(outcome) => print_outcome(&outcome),
                 Err(error) => eprintln!("error: {error}"),
@@ -53,7 +60,6 @@ fn render(effect: handler::Effect) {
             if enabled { "enabled" } else { "disabled" }
         ),
         handler::Effect::Context(info) => print_context(&info),
-        handler::Effect::Notice(message) => eprintln!("{message}"),
     }
 }
 
@@ -130,17 +136,5 @@ fn print_outcome(outcome: &RunOutcome) {
 }
 
 fn print_help() {
-    println!(
-        "\
-/help                       show this help
-/exit, /quit                exit Minuet
-/new                        start a new in-memory session
-/model                      show the active provider, model, and effort
-/model effort <value>       pass an opaque reasoning effort to the provider
-/model effort clear         use the provider's default effort
-/tools                      list compiled tools and their state
-/tools enable <name>        expose a compiled tool to subsequent model calls
-/tools disable <name>       hide a tool from subsequent model calls
-/context info               ask upstream to count committed context and show usage"
-    );
+    println!("{}", command::help());
 }

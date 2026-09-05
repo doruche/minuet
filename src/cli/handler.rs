@@ -13,7 +13,6 @@ pub enum Effect {
     Tools(Vec<ToolStatus>),
     ToolEnabled { name: String, enabled: bool },
     Context(ContextInfo),
-    Notice(String),
 }
 
 pub async fn handle(kernel: &KernelHandle, command: Command) -> Result<Effect, KernelError> {
@@ -36,6 +35,5 @@ pub async fn handle(kernel: &KernelHandle, command: Command) -> Result<Effect, K
             Ok(Effect::ToolEnabled { name, enabled })
         },
         Command::ContextInfo => Ok(Effect::Context(kernel.context_info().await?)),
-        Command::Usage(message) | Command::Unknown(message) => Ok(Effect::Notice(message)),
     }
 }

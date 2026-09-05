@@ -1,13 +1,11 @@
-use std::{
-    io::{self, Write},
-    ops::Range,
-};
+use std::io::{self, Write};
 
 use ratatui::{
     backend::{Backend, ClearType, CrosstermBackend, WindowSize},
     buffer::Cell,
     layout::{Position, Size},
 };
+use unicode_width::UnicodeWidthStr;
 
 /// Main-screen output must survive ratatui's full clear on horizontal shrink.
 /// Enforce that at the destructive operation, including automatic resizes inside
@@ -38,7 +36,19 @@ impl Backend for InlineBackend {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
-        self.0.draw(content)
+        // Non-region insert_before emits every buffer cell. Writing a wide
+        // glyph's continuation cells again inserts spaces in Crossterm output.
+        // Remove this filter when Ratatui's draw_lines skips those cells, as its
+        // ordinary buffer diff already does. This only adapts display cells.
+        let mut covered = None;
+        self.0.draw(content.filter(|(x, y, cell)| {
+            if covered.is_some_and(|(row, start, end)| *y == row && *x > start && *x < end) {
+                return false;
+            }
+            let width = cell.symbol().width().min(u16::MAX as usize) as u16;
+            covered = Some((*y, *x, x.saturating_add(width)));
+            true
+        }))
     }
     fn append_lines(&mut self, n: u16) -> io::Result<()> {
         self.0.append_lines(n)
@@ -75,11 +85,5 @@ impl Backend for InlineBackend {
     }
     fn flush(&mut self) -> io::Result<()> {
         Backend::flush(&mut self.0)
-    }
-    fn scroll_region_up(&mut self, region: Range<u16>, count: u16) -> io::Result<()> {
-        self.0.scroll_region_up(region, count)
-    }
-    fn scroll_region_down(&mut self, region: Range<u16>, count: u16) -> io::Result<()> {
-        self.0.scroll_region_down(region, count)
     }
 }

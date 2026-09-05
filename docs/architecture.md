@@ -168,6 +168,13 @@ restore terminal modes. The interaction task is the sole terminal input reader,
 including synchronous cursor-position queries made by inline rendering. A
 competing asynchronous terminal reader would steal those replies.
 
+Literal output insertion uses Ratatui's full-screen scrolling path. Partial
+scrolling regions can discard rows instead of archiving them in native
+scrollback; appending a run summary must preserve the preceding answer.
+The backend omits wide-glyph continuation cells from that path's full-buffer
+draws so Crossterm does not write extra spaces. This filter can disappear when
+Ratatui's `draw_lines` skips covered cells like its ordinary buffer diff does.
+
 Crossterm 0.29's Unix `use-dev-tty` event source uses level-triggered polling.
 This avoids the default Mio source losing a cursor-reply readiness edge when a
 resize signal is returned first from the same poll. Its zero-duration poll skips

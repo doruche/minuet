@@ -377,6 +377,11 @@ fn pty_markdown_publishes_blocks_links_and_highlighting_then_restores_input() {
         );
         let raw = String::from_utf8_lossy(&pty.raw);
         assert!(raw.contains("\x1b]8;;https://example.test\x1b\\label\x1b]8;;\x1b\\"));
+        pty.send(b"/model info\r");
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("provider: fixture"),
+            "literal output after Markdown",
+        );
         pty.parser.screen_mut().set_scrollback(1000);
         let mut transcript = String::new();
         for _ in 0..1000 {
@@ -392,7 +397,7 @@ fn pty_markdown_publishes_blocks_links_and_highlighting_then_restores_input() {
         for n in 0..140 {
             assert!(
                 transcript.contains(&format!("line-{n:03} text")),
-                "lost block {n}"
+                "lost block {n}\ntranscript: {transcript}"
             );
         }
         pty.parser.screen_mut().set_scrollback(0);
@@ -657,7 +662,8 @@ fn pty_edits_chinese_pastes_multiline_and_streams_before_tool_return() {
     assert!(!pty.directory.path().join("executed").exists());
     assert!(
         pty.parser.screen().contents().contains("第二行"),
-        "wide output cells must not insert spaces between Chinese characters"
+        "wide output cells must not insert spaces between Chinese characters: {:?}",
+        pty.parser.screen().contents()
     );
     let request: Value = serde_json::from_slice(
         &std::fs::read(pty.directory.path().join("request-0.json")).unwrap(),

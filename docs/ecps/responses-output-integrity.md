@@ -1,6 +1,6 @@
 # Responses stream output integrity and finalized-item compatibility
 
-Status: accepted; implementation authorized, cutover pending.
+Status: closed; cutover complete.
 
 Decision date: 2026-09-06.
 
@@ -283,3 +283,47 @@ failure behavior; private decoder and file-layout details belong in code.
 Keep this ECP as provenance, with implementation revisions, acceptance evidence,
 remaining scope limits, and cutover outcome. Do not mark it closed solely because
 the adapter has been split or the initial text reproduction passes.
+
+
+## Implementation and cutover record
+
+Implementation commits: `ee9aeec`, `d70baad`, `14f32c9`, `c2d1e06`, and
+`9cfb5f6`. The adapter is now a same-owner directory split into `mod.rs`,
+`sse.rs`, `stream.rs`, and `wire.rs`. `sse.rs` owns bounded event framing;
+`stream.rs` owns request-local event state, finalized-item adjudication,
+terminal validation, identity checks, and resource limits; `wire.rs` owns
+request and output conversion. The public inference interface and kernel
+commit handoff are unchanged.
+
+The implemented compatibility rule accepts a complete terminal output and the
+observed relay form with an empty terminal output reconstructed from contiguous,
+fully finalized items. It rejects unindexed activity during empty-output
+reconstruction, unmatched started indexes, duplicate identities and call IDs,
+source conflicts, incomplete items, post-terminal events, duplicate terminals,
+resource exhaustion, and unclean EOF. Refusal content is included in the text
+projection. `[DONE]` remains a framing sentinel and cannot establish success.
+
+Validation completed on 2026-09-06:
+
+- `nix develop -c cargo fmt` completed successfully.
+- `nix develop -c cargo clippy --locked --all-targets --all-features -- -D warnings` passed.
+- `nix develop -c cargo test --locked --all-targets` passed: 45 library tests,
+  28 binary tests, 9 CLI tests, and 43 terminal tests; the live MiniMax test
+  remained ignored because it requires a live credentialed probe.
+- `nix develop -c nix flake check --all-systems --no-build` passed.
+- A local HTTP stream harness reproduced the original empty-terminal-output
+  sequence and now printed `OK`; a populated terminal output printed `OK` as
+  before.
+- The independent owner-centered review found and drove one final fix for an
+  unmatched started index before cutover. No blocking architecture or
+  correctness finding remains in the reviewed diff.
+
+Live relay evidence still does not establish tool-call, reasoning-continuation,
+or input-token behavior for the `cch` intermediary. The existing MiniMax live
+probe remains the appropriate independent evidence for that provider and was
+not silently replaced by synthetic fixtures. These are compatibility evidence
+limits, not failures of the finalized-item fix.
+
+This ECP is closed as historical provenance. The supported result forms,
+terminal authority, commit boundary, and failure behavior are now effective in
+code; private file layout and decoder limits remain implementation details.

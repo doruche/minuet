@@ -32,6 +32,37 @@ passes an uninterpreted string to the upstream provider, while `/context info`
 uses the upstream `input_tokens` operation and displays usage reported by prior
 responses. No local model capability or context-window table is maintained.
 
+## Terminal interaction
+
+With terminal stdin and stdout, Minuet uses an inline TUI and leaves completed
+output in the terminal's scrollback. Enter submits; Alt+Enter inserts a newline.
+Bracketed multi-line paste is one edit and does not submit automatically. Editing
+deletes and moves across whole grapheme clusters, including Chinese text. Input
+history, completion menus, and accepting additional input during a run are not
+implemented.
+
+Tools can publish text while they execute. The display shows `Running`, live
+fragments (including text without a trailing newline), and `Ran`, `Failed`, or
+`Skipped` followed by a separately labelled final result. Process output is not
+silently substituted for the result sent to the model. The current small builtin
+tools return immediately and do not manufacture intermediate output.
+
+`/help` lists commands; `/tools --help` and `/tools enable --help` show nested
+usage. Slash-command arguments support shell-style quoting and escaping without
+shell expansion. For example, `/model effort "vendor depth"` passes one opaque
+value. Ordinary prompts retain their leading/trailing whitespace and newlines.
+
+Ctrl-C exits the interface and enters the existing shutdown path. It does not
+cancel the current run; shutdown may wait for inference or a tool to finish.
+Terminal modes are restored before that wait. Setting a nonempty `NO_COLOR`
+disables colors. With redirected stdin or stdout, the same commands and progress
+use plain text without a prompt, animation, or ANSI controls. This path processes
+one input line at a time. The conversation transcript goes to stdout; fatal
+startup, I/O and shutdown errors go to stderr.
+
+See [current limitations](docs/current-limitations.md) for terminal behavior and
+[architecture](docs/architecture.md#run-observation) for the tool output contract.
+
 ## Development
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for commit and pull request guidance.
@@ -55,6 +86,10 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 nix flake check --all-systems --no-build
 ```
+
+The test suite includes local provider fixtures and real pseudo-terminal checks
+for streaming, Unicode editing, resize, pipes and shutdown. No live API is needed
+for these checks.
 
 The live MiniMax compatibility test is intentionally ignored by the default
 suite. With `MINIMAX_API_KEY` set, run it explicitly:

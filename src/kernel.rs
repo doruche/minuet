@@ -543,7 +543,21 @@ mod tests {
         .unwrap();
         let handle = running.handle();
 
-        let outcome = handle.run("loop forever").await.unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let run = tokio::spawn(async move { handle.run_with_events("loop forever", sender).await });
+        assert!(matches!(
+            event(&mut receiver).await,
+            RunEvent::InferenceStarted
+        ));
+        assert!(
+            matches!(event(&mut receiver).await, RunEvent::ToolFinished { activity, .. }
+            if activity.status == crate::agent_loop::ToolActivityStatus::Skipped)
+        );
+        assert!(
+            receiver.recv().await.is_none(),
+            "a skipped call must never start or emit output"
+        );
+        let outcome = run.await.unwrap().unwrap();
         assert_eq!(
             outcome.stop_reason,
             crate::agent_loop::RunStopReason::StepLimit

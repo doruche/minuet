@@ -55,6 +55,31 @@ shutdown may wait for the active inference or tool operation to finish. Process
 level forced termination is an emergency exit and does not promise normal
 cleanup or rollback of external effects.
 
+Ctrl-C and process SIGINT request interface exit followed by this same shutdown;
+there is no cancel-current-run action or second-key force-abort shortcut.
+
+## Terminal interface
+
+The interactive interface uses the terminal's main screen and scrollback. It has
+basic multiline editing but no input history, completion, selection menus,
+application-owned transcript browser or input queue during execution. Redirected
+input is line-oriented and is processed sequentially.
+
+Tool progress is UTF-8 text, not a terminal emulation protocol. Newlines are
+preserved, tabs are displayed as spaces, and other control characters (including
+ANSI escapes and carriage returns) are displayed literally. Progress is separate
+from the final result; both can contain overlapping content. Model responses
+remain non-streaming.
+
+On horizontal shrink, the currently displayed screen is moved into terminal
+scrollback before redraw because the current renderer otherwise clears it. This
+preserves output but may also retain a snapshot of the previous input/status
+area. There is no application-level reflow of already published scrollback.
+
+The plain-input reader is process-scoped. If stdin is blocked when the interface
+exits, that reader holds no kernel or output capability and is reclaimed at
+process exit; shutdown does not wait for another external input line.
+
 ## Other deliberately absent features
 
 The current application does not provide a policy engine, subagent

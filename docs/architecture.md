@@ -72,3 +72,33 @@ A `ToolFinished` event reports execution (or an explicit skip), not successful
 session commit or overall run success. Later commit or inference failures remain
 observable through the run's returned error. `RunOutcome` retains its immutable
 summary for callers that do not need live observation.
+
+## CLI and terminal ownership
+
+`cli::app` owns pending user requests and coordinates input, progress and display.
+Its status label is only a projection of received events; the pending request
+controls input admission. Run progress is drained before displaying the returned
+outcome, and the outcome's tool summary is not replayed after live observation.
+Parsing, command handling and rendering share no session storage or tool registry.
+The command declaration owns grammar, aliases, help and usage; parsed external
+forms become the existing narrow kernel operations.
+
+`cli::input` owns one editing component and its buffer. Grapheme-aware operations
+adapt the component's scalar cursor positions through its editing API. There is
+no second writable input string. `cli::render` owns presentation conventions;
+its unfinished output line is a bounded-by-display-width rendering tail, not a
+second conversation. Completed display rows are handed to terminal scrollback.
+
+`cli::terminal` owns terminal modes and output. Setup establishes its cleanup
+guard before fallible viewport initialization; normal exit, errors and unwinding
+restore terminal modes. The interaction task is the sole terminal input reader,
+including synchronous cursor-position queries made by inline rendering. A
+competing asynchronous terminal reader would steal those replies.
+
+Ctrl-C and SIGINT both exit this interaction layer. Returning drops the observer
+and pending request, restores the terminal, and lets `main` run existing kernel
+shutdown. This is not cancellation of an accepted run. The pipeline adapter and
+inline renderer consume the same run events and command effects; neither owns
+execution or session transitions. The pipe reader owns only process-lifetime
+stdin and a bounded input sender, so a blocked external read cannot retain the
+kernel or prevent Tokio runtime teardown.

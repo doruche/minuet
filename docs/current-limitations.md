@@ -17,7 +17,10 @@ tool toggles changed during an interactive run are not written back to disk.
 ## Inference and context
 
 Minuet currently uses one stream-only, OpenAI-compatible Responses protocol for
-generation. Input-token counting remains a separate JSON operation.
+generation. A successful stream may provide its final output in the terminal
+response or as a complete set of finalized output items when the terminal
+output array is empty; inconsistent or incomplete forms fail visibly.
+Input-token counting remains a separate JSON operation.
 Provider-specific continuation data is retained and replayed, but no other
 provider protocol is exposed by the application.
 

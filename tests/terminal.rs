@@ -438,7 +438,7 @@ fn pty_unclosed_model_code_cannot_capture_the_run_limit_notice() {
     );
     let contents = pty.parser.screen().contents();
     assert!(
-        contents.contains("fn partial() {}\n```\nrun stopped:"),
+        contents.contains("fn partial() {}\nrun stopped:"),
         "{contents:?}"
     );
     let row = contents

@@ -261,3 +261,23 @@ For Keter or Apollyon, stop before the completion claim or cutover and report:
 
 The scan does not authorize unrelated cleanup. If the repair lies outside the
 current task boundary, report it instead of silently expanding scope.
+
+## Effective contracts and engineering change proposals
+
+Use `docs/contracts/` for current normative rules shared across owners,
+components, future changes, or external interfaces. Keep contracts small and
+organized as `docs/contracts/<subsystem>/<contract>.md`; do not create them for
+local implementation details or to catalogue the repository.
+
+Use `docs/ecps/` for consequential proposed changes that require decisions
+about target, ownership, handoff, failure or cleanup, public behavior,
+compatibility, durable rules, risky probes, or semantic cutover. An ECP is a
+proposal and authorization record, not an implementation plan or a second
+current specification. Do not require one solely because work is large or
+spans multiple files.
+
+An ECP establishes its baseline, target and non-goals, protected boundaries,
+acceptance evidence, and stop conditions. Proposed behavior stays outside
+effective contracts until implementation, validation, and cutover are complete.
+At cutover, update only affected contracts; a closed ECP remains provenance.
+Do not create ECPs retroactively for historical work.

@@ -1,198 +1,55 @@
 # Architecture
 
-Minuet begins as one crate with module boundaries that can become crate
-boundaries after the basic chain is stable. Its center is a micro-kernel: the
-kernel owns lifecycle and state transitions, while injected components own
-replaceable policy or external adaptation.
+Minuet is one crate organized around a micro-kernel. The kernel owns lifecycle
+and state transitions; injected components own replaceable policy and external
+adaptation. Module boundaries are semantic owner boundaries, not a promise
+that each module will become a crate.
 
-## Ownership
+## Owners and dependency direction
 
-- `kernel` is the sole command sequencer. A consumer receives `KernelHandle`,
-  not the store, registry, or their locks.
-- `session` owns committed conversation items, per-session reasoning effort,
-  and usage reported by successful inference calls. Its snapshots are immutable
-  and are used only during the kernel's serialized command processing.
-- `agent_loop` owns inference/tool sequencing policy. The initial `ReactLoop`
-  receives a narrow `LoopContext`; that capability enforces commit ordering and
-  tool visibility without exporting store internals.
-- `context` owns selection of the model-visible view of committed history. The
-  initial `FullContext` returns an ordered snapshot without maintaining a second
-  writable conversation.
-- `tool` owns the compiled tool set and its runtime enabled subset. The initial
-  function tools are `echo`, `random_integer`, and `current_datetime`.
-  Tools use JSON values as Minuet's heterogeneous input/output protocol; this
-  is a domain choice, while provider adapters own wire serialization. A tool's
-  definition is sampled once at registration and is the immutable contract for
-  that registered capability.
-- `inference` defines a protocol-neutral backend capability.
-  `openai_responses` alone owns OpenAI Responses wire JSON and HTTP behavior.
+- `kernel` is the command sequencer and sole owner of runtime transitions.
+  Consumers receive `KernelHandle`, never the store, registry, or their locks.
+- `session` owns committed conversation items, session settings, and usage.
+  Snapshots are immutable and consumed during serialized kernel processing.
+- `agent_loop` owns inference/tool sequencing policy through a narrow
+  `LoopContext` capability.
+- `context` selects the model-visible view of committed history without a
+  second writable conversation.
+- `tool` owns the compiled tool set and enabled subset. JSON is the internal
+  heterogeneous tool value protocol; provider adapters own wire encoding.
+- `inference` defines the protocol-neutral backend capability; the
+  `openai_responses` adapter owns OpenAI Responses JSON and HTTP behavior.
+- `config` resolves provider credentials at startup into a private snapshot.
+  Provider identity and protocol selection remain separate.
+- `cli` resolves command grammar and frontend selection. `main` constructs the
+  runtime and owns final kernel shutdown.
+- `tui` owns terminal input, presentation, and observation state. Execution and
+  session transitions remain in the kernel.
 
-Provider identity and protocol are deliberately separate. A configured provider
-selects an endpoint and credential environment variable; `openai-responses`
-selects the adapter. `config` resolves the selected provider's environment
-variable once at load and owns a private credential snapshot, redacted in debug
-output. The runtime provider configuration carries the resolved value rather
-than an environment variable reference; changing credentials requires loading
-a new configuration and constructing a new backend. Model names and reasoning
-effort are opaque strings passed to that adapter, not entries in a locally
-maintained capability matrix.
+## Stable cross-boundary rules
 
-## Kernel commands and lifetime
+Rules that callers and future changes must preserve live in
+[`contracts/`](contracts/). They are organized by subsystem and contain only
+the smallest durable closure needed by their consumers. Proposed changes to
+those rules live in [`ecps/`](ecps/) until validation and cutover.
 
-`kernel::command` owns the handle and internal request protocol. Each command
-variant fixes its payload and result types through a shared `Envelope<P, R>`;
-the reply channel belongs to the envelope, not to the business payload. There
-is no untyped response enum or caller-side downcast. The kernel task remains the
-only command sequencer and retains all state transitions in `kernel/mod.rs`.
+Implementation-specific limits and deliberately unsupported capabilities live
+in [`current-limitations.md`](current-limitations.md). Local invariants remain
+in code, tests, or nearby comments.
 
-Successful enqueue transfers work to the task. Dropping a waiting request before
-enqueue abandons submission; dropping it afterwards only abandons the reply.
-Shutdown is an ordered barrier: earlier commands finish, later queued commands
-are rejected with `KernelError::Stopped`. `RunningKernel::shutdown` also joins
-the task so completion includes resource cleanup. Dropping `RunningKernel`
-without awaiting shutdown detaches it; task exit then depends on the last
-handle closing and queued work finishing, including event backpressure.
+## Runtime shape
 
-## Conversation and context
+At runtime, the kernel serializes commands and owns their state transitions. A successful
+enqueue transfers work to the kernel task; shutdown is an ordered barrier and
+`RunningKernel::shutdown` joins that task. Runs expose progress through an
+optional bounded observer while `RunOutcome` remains the authority for result
+and completion.
 
-The memory session history is the canonical conversation. The initial context
-strategy sends that full history on every inference call: there is no local
-compression, truncation, token estimation, context-window metadata, or
-`previous_response_id` chain.
+The memory session is the canonical conversation. The initial context sends
+the full committed history on every model turn. Provider continuation items
+remain opaque to the core, while adapters project only the fields needed by
+the loop.
 
-Responses output may contain messages, reasoning state, and function calls in
-the same array. The adapter projects only the text and callable fields needed by
-the loop, while retaining every complete output item as an opaque continuation.
-The kernel can replay these items but cannot inspect or mutate their wire form.
-This preserves provider-specific continuation state without spreading the
-Responses representation across the core.
-
-`/context info` invokes the provider's `/responses/input_tokens` operation for
-the committed history and currently enabled tools. Separately, the session sums
-only usage actually returned by inference responses and marks the sum partial if
-any successful call omitted usage. Minuet does not store a context-window size.
-
-## Current limits
-
-The user-visible and operational limits of this implementation are maintained
-in [`current-limitations.md`](current-limitations.md). Keeping that list in one
-place avoids treating a transient module shape as a product guarantee.
-
-## Run observation
-
-`KernelHandle::run` accepts either a prompt alone or a `RunRequest` carrying an
-optional caller-owned bounded event channel. The caller must consume progress
-concurrently with awaiting the result. Detaching either
-observer or result does not cancel accepted execution; a closed observer releases
-blocked sends and disables further delivery.
-
-The runtime owns inference and tool-call lifecycle events. A tool borrows only a
-`ToolOutput` capability for execution-time UTF-8 fragments. It cannot fabricate
-completion events or retain the capability beyond its invocation. Writes apply
-backpressure and preserve text without adding newlines; large writes are split
-at UTF-8 boundaries. Progress text is presentation data, not session history.
-The tool's final return value remains the sole source of its committed result.
-The registry encodes that JSON value, and execution errors or skipped calls,
-through one shared result encoder before they cross into session history.
-
-A `ToolFinished` event reports execution (or an explicit skip), not successful
-session commit or overall run success. Later commit or inference failures remain
-observable through the run's returned error. `RunOutcome` retains its immutable
-summary for callers that do not need live observation.
-
-## CLI entry and one-shot chat
-
-`cli` owns argv grammar and frontend selection. It resolves an invocation before
-configuration loading or runtime construction: help/version need neither, TUI
-requires terminal stdin/stdout, and `chat -` reads all stdin synchronously before
-any kernel exists. There is no background pipe reader to reclaim. Frontends
-receive a resolved prompt or an explicit TUI selection; a renderer does not
-choose application behavior based on terminal detection.
-
-`main` owns component construction and the running kernel's final shutdown/join.
-Both frontend success and failure pass through that barrier; frontend and
-shutdown errors are both reported if both fail. Each process has a fresh memory
-session store.
-
-`cli::chat` owns one request and the shell-facing result contract. It calls
-`KernelHandle::run` without an event subscription and uses the returned
-`RunOutcome` as the authority for completion. stdout contains only final model
-text (or the last turn's text on a step limit); diagnostics and nonzero exit codes
-make failure observable. It does not use TUI commands, rendering or input state.
-SIGINT drops the waiting reply and returns an interrupted exit result to `main`,
-which still joins accepted execution. Interruption does not transfer cancellation
-authority to the frontend.
-
-## TUI and terminal ownership
-
-`tui::app` owns pending user requests and coordinates input, progress and display.
-Each pending request retains its monotonic submission time and a status label
-projected from received events. The label may lag execution; the pending request
-alone controls input admission. Each redraw borrows the label and samples elapsed
-time from that request's submission time. The renderer formats the duration and
-derives animation without a separate running flag or mutable clock. A local
-interval redraws only while a request is pending. Timing measures the TUI's wait
-until it observes the reply, not provider execution time, and never drives
-timeouts or cancellation. Completion summaries use that fixed duration and the
-returned run result, including failures and turn-limit stops. Run progress is
-drained before displaying the returned outcome, and the outcome's tool summary
-is not replayed after live observation.
-Command modules own their subcommand grammar, execution and result text; the
-root only assembles and dispatches command families. They share no session
-storage or tool registry and invoke the existing narrow kernel operations.
-The clap declaration is the single source for grammar, aliases, help and usage.
-A shared help renderer derives layout from that declaration; bare groups are
-informational help requests, while invalid leaf arguments remain errors.
-The output boundary owns terminal styling and line endings.
-
-`tui::input` owns one editing component and its buffer. Grapheme-aware operations
-adapt the component's scalar cursor positions through its editing API. There is
-no second writable input string. `tui::render` owns presentation conventions;
-its unfinished output line is a bounded-by-display-width rendering tail, not a
-second conversation. Completed display rows are handed to terminal scrollback.
-
-`tui::render::markdown` parses complete answers and owns block formatting,
-Unicode wrapping, and link destinations on immutable display segments. It
-sanitizes decoded text, including Markdown entities, before publication. Only
-one top-level block's display data is retained; the session's raw model text
-remains authoritative. There is no dormant streaming parser or TUI transcript
-store. Run-stop notices and tool/command output use the literal text path.
-
-`Screen` owns the handoff between Ratatui's inline viewport and rich scrollback
-output. Ratatui 0.30 cells cannot carry hyperlink metadata, so Screen withdraws
-the viewport, publishes completed blocks through the terminal's Markdown writer,
-then recreates display buffers at the actual cursor position. The writer alone
-encodes OSC 8 and percent-escapes controls in destinations. It closes links and
-resets styles at row boundaries and attempts those resets on write failure;
-terminal-mode teardown retries them. If publication or reanchoring fails, the
-error propagates and teardown restores modes without clearing via a possibly
-stale viewport origin. This adapter can move to `insert_before` when Ratatui
-can preserve hyperlinks. Kernel, inference and session contracts do not depend
-on it.
-
-`tui::terminal` owns terminal modes and output. Setup establishes its cleanup
-guard before fallible viewport initialization; normal exit, errors and unwinding
-restore terminal modes. The interaction task is the sole terminal input reader,
-including synchronous cursor-position queries made by inline rendering. A
-competing asynchronous terminal reader would steal those replies.
-
-Literal output insertion uses Ratatui's full-screen scrolling path. Partial
-scrolling regions can discard rows instead of archiving them in native
-scrollback; appending a run summary must preserve the preceding answer.
-The backend omits wide-glyph continuation cells from that path's full-buffer
-draws so Crossterm does not write extra spaces. This filter can disappear when
-Ratatui's `draw_lines` skips covered cells like its ordinary buffer diff does.
-
-Crossterm 0.29's Unix `use-dev-tty` event source uses level-triggered polling.
-This avoids the default Mio source losing a cursor-reply readiness edge when a
-resize signal is returned first from the same poll. Its zero-duration poll skips
-reads, so the interaction task uses a one-millisecond bounded poll between async
-waits. Reconsider the source selection when the default source preserves all
-readiness notifications; remove the minimum timeout when zero-duration reads
-work. Neither path retries or hides terminal I/O failures.
-
-Ctrl-C and SIGINT both exit this interaction layer. Returning drops the observer
-and pending request, restores the terminal, and lets `main` run existing kernel
-shutdown. This is not cancellation of an accepted run. The TUI owns its event
-receiver and presentation state; execution and session transitions remain in
-the kernel.
+The TUI has one terminal input reader and restores terminal modes on normal,
+error, and interrupted exits. Progress is presentation data, not session
+history; terminal rendering does not own execution cancellation.

@@ -1,9 +1,5 @@
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::{
-    style::Style,
-    widgets::{Block, Borders},
-};
-use ratatui_textarea::{CursorMove, TextArea, WrapMode};
+use ratatui_textarea::{CursorMove, TextArea};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub enum Action {
@@ -19,17 +15,19 @@ pub struct Input {
 impl Default for Input {
     fn default() -> Self {
         let mut editor = TextArea::default();
-        editor.set_block(Block::default().borders(Borders::TOP).title(" minuet "));
-        editor.set_cursor_line_style(Style::default());
-        editor.set_wrap_mode(WrapMode::Glyph);
         editor.set_max_histories(0);
         Self { editor }
     }
 }
 
 impl Input {
-    pub fn widget(&self) -> &TextArea<'static> {
-        &self.editor
+    pub fn lines(&self) -> &[String] {
+        self.editor.lines()
+    }
+
+    pub fn cursor(&self) -> (usize, usize) {
+        let cursor = self.editor.cursor();
+        (cursor.0, cursor.1)
     }
 
     pub fn handle(&mut self, event: Event, busy: bool) -> Action {
@@ -64,7 +62,8 @@ impl Input {
                     *self = Self::default();
                     return Action::Submit(text);
                 },
-                (KeyCode::Enter, KeyModifiers::ALT) => self.editor.insert_newline(),
+                (KeyCode::Enter, KeyModifiers::SHIFT)
+                | (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.editor.insert_newline(),
                 (KeyCode::Char(c), modifiers)
                     if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
@@ -91,7 +90,7 @@ impl Input {
         Action::Edit
     }
 
-    // The widget owns the only buffer and uses scalar-value cursor offsets.
+    // The editing component owns the only buffer and uses scalar-value cursor offsets.
     // Adapt operations to grapheme boundaries through its public editing API;
     // retaining a second editable string would split input ownership.
     fn boundaries(&self) -> Vec<usize> {
@@ -171,7 +170,6 @@ impl Input {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
-    use ratatui::{Terminal, backend::TestBackend};
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -208,7 +206,7 @@ mod tests {
             matches!(input.handle(key(KeyCode::Enter), false), Action::Submit(text) if text == "  中文\n\tnext\n")
         );
         input.handle(
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
             false,
         );
         assert_eq!(input.editor.lines(), &["", ""]);
@@ -231,24 +229,25 @@ mod tests {
     }
 
     #[test]
-    fn repaint_removes_wide_character_cells_after_backspace_and_resize() {
+    fn fallback_newline_and_key_release_do_not_submit() {
         let mut input = Input::default();
-        let mut terminal = Terminal::new(TestBackend::new(10, 5)).unwrap();
-        input.handle(Event::Paste("中文中文中文".into()), false);
-        terminal
-            .draw(|frame| frame.render_widget(input.widget(), frame.area()))
-            .unwrap();
-        for _ in 0..6 {
-            input.handle(key(KeyCode::Backspace), false);
-        }
-        terminal
-            .resize(ratatui::layout::Rect::new(0, 0, 8, 5))
-            .unwrap();
-        terminal
-            .draw(|frame| frame.render_widget(input.widget(), frame.area()))
-            .unwrap();
-        for cell in &terminal.backend().buffer().content {
-            assert!(!cell.symbol().contains(['中', '文']));
-        }
+        input.handle(key(KeyCode::Char('a')), false);
+        input.handle(
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            false,
+        );
+        assert_eq!(input.lines(), &["a", ""]);
+        assert!(matches!(
+            input.handle(
+                Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                    KeyEventKind::Release
+                )),
+                false
+            ),
+            Action::Edit
+        ));
+        assert_eq!(input.lines(), &["a", ""]);
     }
 }

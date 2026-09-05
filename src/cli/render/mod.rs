@@ -1,3 +1,7 @@
+mod input;
+
+pub(super) use input::InputLayout;
+
 use minuet::agent_loop::{RunOutcome, RunStopReason, ToolActivity, ToolActivityStatus};
 use ratatui::{
     Frame,
@@ -8,8 +12,6 @@ use ratatui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-
-use super::input::Input;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Tone {
@@ -29,7 +31,7 @@ impl Tone {
             Self::Text => Style::default(),
             Self::Meta => Style::default().fg(Color::DarkGray),
             Self::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            Self::User => Style::default().fg(Color::Cyan),
+            Self::User => Style::default().fg(Color::LightBlue),
         }
     }
 }
@@ -100,17 +102,18 @@ impl OutputTail {
 
 pub fn draw(
     frame: &mut Frame,
-    input: &Input,
+    input: &InputLayout,
     status: &str,
     tail: &OutputTail,
     busy: bool,
     colors: bool,
+    shift_enter: bool,
 ) {
     let areas = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(u16::from(!tail.text.is_empty())),
+        Constraint::Length(u16::from(!status.is_empty())),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(u16::from(frame.area().height > 1)),
     ])
     .split(frame.area());
     frame.render_widget(
@@ -121,18 +124,15 @@ pub fn draw(
         Paragraph::new(safe_text(status)).style(Tone::Meta.style(colors)),
         areas[1],
     );
-    if busy {
-        frame.render_widget(
-            Paragraph::new("minuet> (busy)").style(Tone::Meta.style(colors)),
-            areas[2],
-        );
-    } else {
-        frame.render_widget(input.widget(), areas[2]);
+    if !busy {
+        input.draw(frame, areas[2], colors);
     }
     let hint = if busy {
         "Ctrl-C: exit and wait for shutdown"
+    } else if shift_enter {
+        "Enter: send · Shift-Enter / Ctrl-O: newline · Ctrl-C: exit"
     } else {
-        "Enter: send · Alt-Enter: newline · Ctrl-C: exit"
+        "Enter: send · Ctrl-O: newline · Ctrl-C: exit"
     };
     frame.render_widget(
         Paragraph::new(hint).style(Tone::Meta.style(colors)),

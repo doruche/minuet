@@ -1,15 +1,24 @@
+mod backend;
+
+use backend::InlineBackend;
+
 use std::io::{self, IsTerminal, Write};
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{DisableBracketedPaste, EnableBracketedPaste},
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     style::{Attribute, ResetColor, SetAttribute},
-    terminal::{disable_raw_mode, enable_raw_mode},
+    terminal::{
+        BeginSynchronizedUpdate, EndSynchronizedUpdate, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
-    backend::{Backend, CrosstermBackend},
     widgets::{Paragraph, Widget},
 };
 
@@ -24,7 +33,7 @@ pub enum Screen {
 }
 
 pub struct Inline {
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: Terminal<InlineBackend>,
     mode: TerminalMode,
     tail: OutputTail,
     colors: bool,
@@ -35,13 +44,27 @@ pub struct Inline {
 // shutdown runs after CLI teardown and does not own these resources.
 struct TerminalMode {
     active: bool,
+    keyboard_enhanced: bool,
 }
 
 impl TerminalMode {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
-        let mode = Self { active: true };
+        let mut mode = Self {
+            active: true,
+            keyboard_enhanced: false,
+        };
         execute!(io::stdout(), EnableBracketedPaste, Hide)?;
+        // Capability discovery is optional. A timeout/unrecognized reply leaves
+        // Ctrl-O as the advertised newline key; it must not disable editing.
+        // Windows' native console events already carry Shift separately.
+        if supports_keyboard_enhancement().unwrap_or(false) {
+            mode.keyboard_enhanced = true;
+            execute!(
+                io::stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )?;
+        }
         Ok(mode)
     }
 
@@ -50,15 +73,25 @@ impl TerminalMode {
             return Ok(());
         }
         let modes = disable_raw_mode();
+        let keyboard = if self.keyboard_enhanced {
+            let result = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+            if result.is_ok() {
+                self.keyboard_enhanced = false;
+            }
+            result
+        } else {
+            Ok(())
+        };
         let display = execute!(
             io::stdout(),
             DisableBracketedPaste,
             ResetColor,
             SetAttribute(Attribute::Reset),
+            EndSynchronizedUpdate,
             Show
         );
-        self.active = modes.is_err() || display.is_err();
-        modes.and(display)
+        self.active = modes.is_err() || keyboard.is_err() || display.is_err();
+        modes.and(keyboard).and(display)
     }
 }
 
@@ -77,9 +110,9 @@ impl Screen {
         }
         let mode = TerminalMode::enter()?;
         let terminal = Terminal::with_options(
-            CrosstermBackend::new(io::stdout()),
+            InlineBackend::new(),
             TerminalOptions {
-                viewport: Viewport::Inline(8),
+                viewport: Viewport::Inline(2),
             },
         )?;
         let colors = std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
@@ -143,11 +176,10 @@ impl Screen {
 
     pub fn draw(&mut self, input: &Input, status: &str, busy: bool) -> io::Result<()> {
         if let Self::Inline(inline) = self {
-            inline.resize()?;
-            inline.append("")?;
-            inline.terminal.draw(|frame| {
-                render::draw(frame, input, status, &inline.tail, busy, inline.colors)
-            })?;
+            execute!(inline.terminal.backend_mut(), BeginSynchronizedUpdate)?;
+            let draw = inline.draw(input, status, busy);
+            let end = execute!(inline.terminal.backend_mut(), EndSynchronizedUpdate);
+            draw.and(end)?;
         }
         Ok(())
     }
@@ -169,24 +201,48 @@ impl Screen {
 }
 
 impl Inline {
-    fn resize(&mut self) -> io::Result<()> {
+    fn draw(&mut self, input: &Input, status: &str, busy: bool) -> io::Result<()> {
+        self.append("")?;
         let size = self.terminal.size()?;
-        if size.width < self.terminal.get_frame().area().width {
-            // Ratatui 0.30 clears the entire visible screen on horizontal shrink.
-            // Archive it to terminal scrollback first so completed output is not
-            // erased. This may retain an old input/status snapshot, never session
-            // state. Remove this bridge when inline resize preserves output;
-            // the PTY resize test guards that boundary. I/O failures propagate.
-            self.terminal
-                .set_cursor_position((0, size.height.saturating_sub(1)))?;
-            self.terminal.backend_mut().append_lines(size.height)?;
-            self.terminal.set_cursor_position((0, 0))?;
+        let layout = render::InputLayout::new(input, size.width);
+        let height = (if busy { 1 } else { layout.height() }
+            + 1
+            + u16::from(!self.tail.text.is_empty())
+            + u16::from(!status.is_empty()))
+        .min(size.height)
+        .max(1);
+        if height != self.terminal.get_frame().area().height {
+            // Ratatui 0.30 has no API to change an inline viewport's requested
+            // height. Recreate only its display buffers at the same origin;
+            // modes and unfinished output remain owned by this Inline. Replace
+            // this with a height setter when ratatui provides one.
+            let origin = self.terminal.get_frame().area().y;
+            self.terminal.clear()?;
+            self.terminal.set_cursor_position((0, origin))?;
+            self.terminal = Terminal::with_options(
+                InlineBackend::new(),
+                TerminalOptions {
+                    viewport: Viewport::Inline(height),
+                },
+            )?;
         }
-        self.terminal.autoresize()
+        let shift_enter = cfg!(windows) || self.mode.keyboard_enhanced;
+        self.terminal.draw(|frame| {
+            render::draw(
+                frame,
+                &layout,
+                status,
+                &self.tail,
+                busy,
+                self.colors,
+                shift_enter,
+            )
+        })?;
+        Ok(())
     }
 
     fn append(&mut self, text: &str) -> io::Result<()> {
-        self.resize()?;
+        self.terminal.autoresize()?;
         let width = self.terminal.size()?.width;
         let rows = self.tail.push(text, width);
         // Bound insertion buffers even when a final result contains many lines.

@@ -167,12 +167,18 @@ struct Pty {
     parser: vt100::Parser,
     raw: Vec<u8>,
     query_count: usize,
+    keyboard_query_count: usize,
+    keyboard_reply: Option<bool>,
     initial_modes: nix::sys::termios::Termios,
     directory: tempfile::TempDir,
 }
 
 impl Pty {
     fn start(fail: bool) -> Self {
+        Self::start_with_options(fail, Some(false), true)
+    }
+
+    fn start_with_options(fail: bool, keyboard_reply: Option<bool>, colors: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -187,6 +193,7 @@ impl Pty {
         command.args(["--exact", "terminal_fixture", "--nocapture"]);
         command.env(FIXTURE_ENV, directory.path());
         command.env("TERM", "xterm-256color");
+        command.env("NO_COLOR", if colors { "" } else { "1" });
         if fail {
             command.env("MINUET_TERMINAL_TEST_FAIL", "1");
         }
@@ -202,6 +209,8 @@ impl Pty {
             parser: vt100::Parser::new(24, 80, 2000),
             raw: Vec::new(),
             query_count: 0,
+            keyboard_query_count: 0,
+            keyboard_reply,
             initial_modes,
             directory,
         }
@@ -229,6 +238,20 @@ impl Pty {
                     self.send(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
                 }
                 self.query_count = queries;
+                let queries = self
+                    .raw
+                    .windows(3)
+                    .filter(|bytes| *bytes == b"\x1b[c")
+                    .count();
+                for _ in self.keyboard_query_count..queries {
+                    if let Some(enhanced) = self.keyboard_reply {
+                        if enhanced {
+                            self.send(b"\x1b[?0u");
+                        }
+                        self.send(b"\x1b[?1;2c");
+                    }
+                }
+                self.keyboard_query_count = queries;
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {},
             Err(mpsc::RecvTimeoutError::Disconnected) => {},
@@ -250,9 +273,13 @@ impl Pty {
 
     fn ready(&mut self) {
         self.wait_for(
-            |pty| pty.parser.screen().contents().contains("Alt-Enter"),
+            |pty| pty.frame_complete() && pty.parser.screen().contents().contains("Ctrl-O"),
             "input ready",
         );
+    }
+
+    fn frame_complete(&self) -> bool {
+        self.raw.ends_with(b"\x1b[?2026l")
     }
     fn release(&self) {
         std::fs::write(self.directory.path().join("release"), "").unwrap();
@@ -284,6 +311,171 @@ impl Drop for Pty {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[test]
+fn pty_backspace_clears_wide_character_styles() {
+    let mut pty = Pty::start(false);
+    pty.ready();
+    let mut text = "中文测试输入".to_owned();
+    pty.send(text.as_bytes());
+    pty.wait_for(
+        |p| p.parser.screen().contents().contains(&text),
+        "wide text",
+    );
+    while text.pop().is_some() {
+        pty.send(b"\x7f");
+        pty.wait_for(
+            |p| {
+                let screen = p.parser.screen().contents();
+                p.frame_complete()
+                    && screen
+                        .lines()
+                        .any(|line| line.trim_end() == format!("> {text}").trim_end())
+            },
+            "deleted wide character",
+        );
+        let screen = pty.parser.screen();
+        let (height, width) = screen.size();
+        let reversed = (0..height)
+            .flat_map(|row| (0..width).map(move |col| (row, col)))
+            .filter(|&(row, col)| screen.cell(row, col).unwrap().inverse())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reversed.len(),
+            0,
+            "cursor residue after deleting to {text:?}: {reversed:?}"
+        );
+        let (row, col) = screen.cursor_position();
+        assert_eq!(col, 2 + text.chars().count() as u16 * 2);
+        assert!(!screen.hide_cursor());
+        for col in col..width {
+            let cell = screen.cell(row, col).unwrap();
+            assert_eq!(cell.bgcolor(), vt100::Color::Default);
+            assert!(cell.contents().trim().is_empty());
+        }
+    }
+    pty.send(b"/exit\r");
+    pty.finish();
+}
+
+#[test]
+fn pty_shift_enter_and_ctrl_o_preserve_manual_newlines_and_restore_keyboard_mode() {
+    for enhanced in [true, false] {
+        let mut pty = Pty::start_with_options(false, Some(enhanced), true);
+        pty.ready();
+        assert_eq!(
+            pty.parser.screen().contents().contains("Shift-Enter"),
+            enhanced
+        );
+        assert_eq!(pty.raw.windows(5).any(|b| b == b"\x1b[>1u"), enhanced);
+        pty.send("第一行".as_bytes());
+        pty.send(if enhanced { b"\x1b[13;2u" } else { b"\x0f" });
+        pty.send("第二行".as_bytes());
+        pty.send(b"\x0fend");
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("  end"),
+            "manual multiline input",
+        );
+        assert!(!pty.directory.path().join("waiting").exists());
+        pty.send(b"\r");
+        pty.wait_for(
+            |p| p.directory.path().join("request-0.json").exists(),
+            "submitted multiline input",
+        );
+        let request: Value = serde_json::from_slice(
+            &std::fs::read(pty.directory.path().join("request-0.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            request["input"][0]["content"][0]["text"],
+            "第一行\n第二行\nend"
+        );
+        pty.release();
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("assistant-finished"),
+            "run complete",
+        );
+        pty.send(b"/exit\r");
+        pty.finish();
+        assert_eq!(
+            pty.raw.windows(5).filter(|b| *b == b"\x1b[<1u").count(),
+            usize::from(enhanced)
+        );
+        assert_eq!(pty.master.get_termios().unwrap(), pty.initial_modes);
+    }
+}
+
+#[test]
+fn pty_compact_prompt_wraps_and_shrinks_without_cursor_or_style_residue() {
+    let mut pty = Pty::start(false);
+    pty.ready();
+    let screen = pty.parser.screen();
+    let (row, col) = screen.cursor_position();
+    assert_eq!(col, 2);
+    assert_eq!(screen.cell(row, 0).unwrap().contents(), ">");
+    assert_eq!(
+        screen.cell(row, 0).unwrap().fgcolor(),
+        vt100::Color::Idx(12)
+    );
+    assert!(screen.cell(row, 0).unwrap().bold());
+    assert_eq!(screen.cell(row - 1, 0).unwrap().contents(), "M");
+    assert_eq!(screen.cell(row + 1, 0).unwrap().contents(), "E");
+    pty.master
+        .resize(PtySize {
+            rows: 24,
+            cols: 12,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    pty.parser.screen_mut().set_size(24, 12);
+    pty.send("甲乙丙丁戊Z".as_bytes());
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains("  Z"),
+        "wrapped input",
+    );
+    let (row, col) = pty.parser.screen().cursor_position();
+    assert_eq!(col, 3);
+    assert_eq!(
+        pty.parser.screen().cell(row - 1, 0).unwrap().contents(),
+        ">"
+    );
+    let text_cell = pty.parser.screen().cell(row, 2).unwrap();
+    assert_eq!(text_cell.fgcolor(), vt100::Color::Default);
+    assert!(!text_cell.bold());
+    pty.send(b"\x7f\x7f");
+    pty.wait_for(
+        |p| p.frame_complete() && !p.parser.screen().contents().contains(['戊', 'Z']),
+        "shrunk input",
+    );
+    let (row, col) = pty.parser.screen().cursor_position();
+    assert_eq!(col, 10);
+    assert_eq!(
+        pty.parser.screen().cell(row + 1, 0).unwrap().contents(),
+        "E"
+    );
+    pty.send(b"\x7f\x7f\x7f\x7f/exit\r");
+    pty.finish();
+}
+
+#[test]
+fn pty_legacy_probe_timeout_keeps_newline_and_no_color_editing_available() {
+    let mut pty = Pty::start_with_options(false, None, false);
+    pty.ready();
+    assert!(!pty.parser.screen().contents().contains("Shift-Enter"));
+    let (row, _) = pty.parser.screen().cursor_position();
+    assert_eq!(
+        pty.parser.screen().cell(row, 0).unwrap().fgcolor(),
+        vt100::Color::Default
+    );
+    pty.send(b"a\x0fb");
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains("  b"),
+        "fallback newline",
+    );
+    pty.send(b"\x7f\x7f\x7f/exit\r");
+    pty.finish();
 }
 
 #[test]
@@ -420,7 +612,12 @@ fn pty_failure_keeps_progress_and_resize_keeps_input_usable() {
             break;
         }
     }
-    assert!(retained, "horizontal resize erased completed output");
+    assert!(
+        retained,
+        "horizontal resize erased completed output\nscreen: {}\nraw: {:?}",
+        pty.parser.screen().contents(),
+        String::from_utf8_lossy(&pty.raw)
+    );
     pty.send(b"\x03");
     pty.finish();
 }

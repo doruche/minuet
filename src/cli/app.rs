@@ -125,7 +125,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                     Action::Edit => {},
                     Action::Submit(line) => {
                         if interactive && !line.trim().is_empty() {
-                            screen.line(&format!("› {line}"), Tone::User)?;
+                            screen.line(&format!("> {line}"), Tone::User)?;
                         }
                         match command::parse(&line) {
                             command::Input::Empty => {},

@@ -7,7 +7,7 @@ use std::{
 use crossterm::event::{self, Event};
 use minuet::{
     agent_loop::{RunEvent, RunOutcome},
-    kernel::{KernelError, KernelHandle},
+    kernel::{KernelError, KernelHandle, RunRequest},
 };
 use tokio::sync::mpsc;
 
@@ -142,7 +142,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                                 let (sender, receiver) = mpsc::channel(PROGRESS_BUFFER);
                                 events = Some(receiver);
                                 let kernel = kernel.clone();
-                                request = Some(Box::pin(async move { kernel.run_with_events(prompt, sender).await.map(Reply::Run) }));
+                                request = Some(Box::pin(async move { kernel.run(RunRequest::with_events(prompt, sender)).await.map(Reply::Run) }));
                                 status = "Starting…".into();
                             },
                         }

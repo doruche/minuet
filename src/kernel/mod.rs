@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use thiserror::Error;
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::JoinHandle,
-};
+use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     agent_loop::{AgentLoop, LoopContext, LoopError, RunEvent, RunOutcome},
@@ -12,8 +9,13 @@ use crate::{
     inference::{InferenceBackend, InferenceRequest},
     model::{IdentifierError, ModelSelection, ReasoningEffort},
     session::{SessionId, SessionStore, SessionStoreError, UsageSummary},
-    tool::{ToolRegistry, ToolRegistryError, ToolStatus},
+    tool::{ToolRegistry, ToolRegistryError},
 };
+
+mod command;
+
+use command::{Command, Envelope};
+pub use command::{KernelHandle, RunRequest};
 
 const COMMAND_BUFFER: usize = 16;
 
@@ -54,94 +56,15 @@ pub fn start(
     };
     let join = tokio::spawn(task.run());
     Ok(RunningKernel {
-        handle: KernelHandle { sender },
+        handle: KernelHandle::new(sender),
         join,
     })
 }
 
-#[derive(Clone)]
-pub struct KernelHandle {
-    sender: mpsc::Sender<Command>,
-}
-
-impl KernelHandle {
-    pub async fn run(&self, prompt: impl Into<String>) -> Result<RunOutcome, KernelError> {
-        self.request(|reply| Command::Run {
-            prompt: prompt.into(),
-            events: None,
-            reply,
-        })
-        .await
-    }
-
-    /// Runs through the same command sequencer while publishing ordered progress.
-    /// The caller must drain the bounded channel concurrently with this future.
-    /// Dropping either receiver or result does not cancel an accepted run.
-    pub async fn run_with_events(
-        &self,
-        prompt: impl Into<String>,
-        events: mpsc::Sender<RunEvent>,
-    ) -> Result<RunOutcome, KernelError> {
-        self.request(|reply| Command::Run {
-            prompt: prompt.into(),
-            events: Some(events),
-            reply,
-        })
-        .await
-    }
-
-    pub async fn new_session(&self) -> Result<SessionId, KernelError> {
-        self.request(|reply| Command::NewSession { reply }).await
-    }
-
-    pub async fn model_info(&self) -> Result<ModelInfo, KernelError> {
-        self.request(|reply| Command::ModelInfo { reply }).await
-    }
-
-    pub async fn set_reasoning_effort(&self, effort: Option<String>) -> Result<(), KernelError> {
-        let effort = effort.map(ReasoningEffort::new).transpose()?;
-        self.request(|reply| Command::SetReasoningEffort { effort, reply })
-            .await
-    }
-
-    pub async fn list_tools(&self) -> Result<Vec<ToolStatus>, KernelError> {
-        self.request(|reply| Command::ListTools { reply }).await
-    }
-
-    pub async fn set_tool_enabled(
-        &self,
-        name: impl Into<String>,
-        enabled: bool,
-    ) -> Result<(), KernelError> {
-        self.request(|reply| Command::SetToolEnabled {
-            name: name.into(),
-            enabled,
-            reply,
-        })
-        .await
-    }
-
-    pub async fn context_info(&self) -> Result<ContextInfo, KernelError> {
-        self.request(|reply| Command::ContextInfo { reply }).await
-    }
-
-    async fn shutdown(&self) -> Result<(), KernelError> {
-        self.request(|reply| Command::Shutdown { reply }).await
-    }
-
-    async fn request<T>(
-        &self,
-        command: impl FnOnce(oneshot::Sender<Result<T, KernelError>>) -> Command,
-    ) -> Result<T, KernelError> {
-        let (reply, response) = oneshot::channel();
-        self.sender
-            .send(command(reply))
-            .await
-            .map_err(|_| KernelError::Stopped)?;
-        response.await.map_err(|_| KernelError::Stopped)?
-    }
-}
-
+/// Owns the task join. Call `shutdown` to wait for accepted work and resource
+/// cleanup. Dropping this owner detaches the task; it continues until all handles
+/// are dropped and queued work is drained (including any event backpressure).
+#[must_use = "call shutdown to wait for kernel cleanup"]
 pub struct RunningKernel {
     handle: KernelHandle,
     join: JoinHandle<()>,
@@ -176,46 +99,51 @@ struct KernelTask {
 impl KernelTask {
     async fn run(mut self) {
         while let Some(command) = self.receiver.recv().await {
+            // Successful enqueue hands execution to this task. Reply receivers
+            // may detach, but that never cancels execution or session commits.
             match command {
-                Command::Run {
-                    prompt,
-                    events,
+                Command::Run(Envelope {
+                    payload: run,
                     reply,
-                } => {
-                    let result = self.run_loop(prompt, events).await;
-                    let _ = reply.send(result);
+                }) => {
+                    let _ = reply.send(self.run_loop(run.prompt, run.events).await);
                 },
-                Command::NewSession { reply } => {
-                    let result = self.new_session();
-                    let _ = reply.send(result);
+                Command::NewSession(Envelope { reply, .. }) => {
+                    let _ = reply.send(self.new_session());
                 },
-                Command::ModelInfo { reply } => {
-                    let result = self.model_info();
-                    let _ = reply.send(result);
+                Command::ModelInfo(Envelope { reply, .. }) => {
+                    let _ = reply.send(self.model_info());
                 },
-                Command::SetReasoningEffort { effort, reply } => {
+                Command::SetReasoningEffort(Envelope {
+                    payload: effort,
+                    reply,
+                }) => {
                     let result = self
                         .store
                         .set_reasoning_effort(self.active_session, effort)
                         .map_err(Into::into);
                     let _ = reply.send(result);
                 },
-                Command::ListTools { reply } => {
+                Command::ListTools(Envelope { reply, .. }) => {
                     let _ = reply.send(Ok(self.tools.list()));
                 },
-                Command::SetToolEnabled {
-                    name,
-                    enabled,
+                Command::SetToolEnabled(Envelope {
+                    payload: change,
                     reply,
-                } => {
-                    let result = self.tools.set_enabled(&name, enabled).map_err(Into::into);
+                }) => {
+                    let result = self
+                        .tools
+                        .set_enabled(&change.name, change.enabled)
+                        .map_err(Into::into);
                     let _ = reply.send(result);
                 },
-                Command::ContextInfo { reply } => {
-                    let result = self.context_info().await;
-                    let _ = reply.send(result);
+                Command::ContextInfo(Envelope { reply, .. }) => {
+                    let _ = reply.send(self.context_info().await);
                 },
-                Command::Shutdown { reply } => {
+                Command::Shutdown(Envelope { reply, .. }) => {
+                    // Reject further requests before acknowledging shutdown.
+                    // Requests queued after this barrier are dropped, not executed.
+                    self.receiver.close();
                     let _ = reply.send(Ok(()));
                     break;
                 },
@@ -277,38 +205,6 @@ impl KernelTask {
         )?;
         agent_loop.run(&mut context).await.map_err(Into::into)
     }
-}
-
-enum Command {
-    Run {
-        prompt: String,
-        events: Option<mpsc::Sender<RunEvent>>,
-        reply: oneshot::Sender<Result<RunOutcome, KernelError>>,
-    },
-    NewSession {
-        reply: oneshot::Sender<Result<SessionId, KernelError>>,
-    },
-    ModelInfo {
-        reply: oneshot::Sender<Result<ModelInfo, KernelError>>,
-    },
-    SetReasoningEffort {
-        effort: Option<ReasoningEffort>,
-        reply: oneshot::Sender<Result<(), KernelError>>,
-    },
-    ListTools {
-        reply: oneshot::Sender<Result<Vec<ToolStatus>, KernelError>>,
-    },
-    SetToolEnabled {
-        name: String,
-        enabled: bool,
-        reply: oneshot::Sender<Result<(), KernelError>>,
-    },
-    ContextInfo {
-        reply: oneshot::Sender<Result<ContextInfo, KernelError>>,
-    },
-    Shutdown {
-        reply: oneshot::Sender<Result<(), KernelError>>,
-    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -544,7 +440,11 @@ mod tests {
         let handle = running.handle();
 
         let (sender, mut receiver) = mpsc::channel(1);
-        let run = tokio::spawn(async move { handle.run_with_events("loop forever", sender).await });
+        let run = tokio::spawn(async move {
+            handle
+                .run(RunRequest::with_events("loop forever", sender))
+                .await
+        });
         assert!(matches!(
             event(&mut receiver).await,
             RunEvent::InferenceStarted
@@ -730,7 +630,10 @@ mod tests {
         let (running, backend, release) = streaming_kernel(false, true);
         let handle = running.handle();
         let (sender, mut receiver) = mpsc::channel(1);
-        let run = tokio::spawn(async move { handle.run_with_events("stream", sender).await });
+        let run =
+            tokio::spawn(
+                async move { handle.run(RunRequest::with_events("stream", sender)).await },
+            );
         assert!(matches!(
             event(&mut receiver).await,
             RunEvent::InferenceStarted
@@ -788,7 +691,10 @@ mod tests {
         let (running, _, release) = streaming_kernel(true, false);
         let handle = running.handle();
         let (sender, mut receiver) = mpsc::channel(1);
-        let run = tokio::spawn(async move { handle.run_with_events("stream", sender).await });
+        let run =
+            tokio::spawn(
+                async move { handle.run(RunRequest::with_events("stream", sender)).await },
+            );
         event(&mut receiver).await;
         event(&mut receiver).await;
         assert!(matches!(
@@ -817,7 +723,10 @@ mod tests {
         let (running, backend, release) = streaming_kernel(false, true);
         let handle = running.handle();
         let (sender, mut receiver) = mpsc::channel(1);
-        let run = tokio::spawn(async move { handle.run_with_events("stream", sender).await });
+        let run =
+            tokio::spawn(
+                async move { handle.run(RunRequest::with_events("stream", sender)).await },
+            );
         event(&mut receiver).await;
         event(&mut receiver).await;
         event(&mut receiver).await;
@@ -832,5 +741,54 @@ mod tests {
             .expect("shutdown blocked on detached observer")
             .unwrap();
         assert_eq!(backend.seen_inputs.lock().unwrap().len(), 2);
+    }
+    #[tokio::test]
+    async fn shutdown_finishes_prior_commands_and_rejects_later_ones() {
+        let (running, _, release) = streaming_kernel(false, true);
+        let handle = running.handle();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let run_handle = handle.clone();
+        let run = tokio::spawn(async move {
+            run_handle
+                .run(RunRequest::with_events("stream", sender))
+                .await
+        });
+        event(&mut receiver).await;
+        event(&mut receiver).await;
+        event(&mut receiver).await;
+        // The tool is gated, so each poll below can only enqueue its request.
+        let before = handle.new_session();
+        let shutdown = running.shutdown();
+        let after = handle.new_session();
+        tokio::pin!(before, shutdown, after);
+        tokio::select! {
+            biased;
+            _ = &mut before => panic!("run must retain the sequencer"),
+            () = std::future::ready(()) => {},
+        }
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => panic!("shutdown must wait for prior work"),
+            () = std::future::ready(()) => {},
+        }
+        tokio::select! {
+            biased;
+            _ = &mut after => panic!("shutdown has not yet reached the sequencer"),
+            () = std::future::ready(()) => {},
+        }
+        drop(receiver);
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            assert!(run.await.unwrap().is_ok());
+            assert!(before.await.is_ok());
+            shutdown.await.unwrap();
+            assert!(matches!(after.await, Err(KernelError::Stopped)));
+            assert!(matches!(
+                handle.model_info().await,
+                Err(KernelError::Stopped)
+            ));
+        })
+        .await
+        .expect("shutdown stalled");
     }
 }

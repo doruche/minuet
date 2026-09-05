@@ -28,6 +28,22 @@ selects an endpoint and credential environment variable; `openai-responses`
 selects the adapter. Model names and reasoning effort are opaque strings passed
 to that adapter, not entries in a locally maintained capability matrix.
 
+## Kernel commands and lifetime
+
+`kernel::command` owns the handle and internal request protocol. Each command
+variant fixes its payload and result types through a shared `Envelope<P, R>`;
+the reply channel belongs to the envelope, not to the business payload. There
+is no untyped response enum or caller-side downcast. The kernel task remains the
+only command sequencer and retains all state transitions in `kernel/mod.rs`.
+
+Successful enqueue transfers work to the task. Dropping a waiting request before
+enqueue abandons submission; dropping it afterwards only abandons the reply.
+Shutdown is an ordered barrier: earlier commands finish, later queued commands
+are rejected with `KernelError::Stopped`. `RunningKernel::shutdown` also joins
+the task so completion includes resource cleanup. Dropping `RunningKernel`
+without awaiting shutdown detaches it; task exit then depends on the last
+handle closing and queued work finishing, including event backpressure.
+
 ## Conversation and context
 
 The memory session history is the canonical conversation. The initial context
@@ -55,9 +71,9 @@ place avoids treating a transient module shape as a product guarantee.
 
 ## Run observation
 
-`KernelHandle::run_with_events` executes through the same sequencer as `run`
-while publishing ordered progress to a caller-owned bounded channel. The caller
-must consume progress concurrently with awaiting the result. Detaching either
+`KernelHandle::run` accepts either a prompt alone or a `RunRequest` carrying an
+optional caller-owned bounded event channel. The caller must consume progress
+concurrently with awaiting the result. Detaching either
 observer or result does not cancel accepted execution; a closed observer releases
 blocked sends and disables further delivery.
 

@@ -1,8 +1,13 @@
 use std::time::{Duration, Instant};
 
+use tokio::time::timeout;
+
 use crate::{
     context::ContextStrategy,
-    inference::{ConversationItem, InferenceBackend, InferenceRequest, OutputEffect, ToolCall},
+    inference::{
+        ConversationItem, InferenceBackend, InferenceError, InferenceRequest, OutputEffect,
+        ToolCall,
+    },
     model::ReasoningEffort,
     session::{SessionId, SessionStore},
     tool::{ToolDefinition, ToolRegistry, encode_error},
@@ -82,16 +87,18 @@ impl<'a> LoopContext<'a> {
     pub async fn infer_and_commit(&mut self) -> Result<CommittedModelTurn, LoopError> {
         self.events.send(RunEvent::InferenceStarted).await;
         let prepared_input = self.context.prepare(&self.input);
-        let response = self
-            .backend
-            .respond(InferenceRequest {
+        let response = timeout(
+            Duration::from_secs(120),
+            self.backend.respond(InferenceRequest {
                 model: self.model,
                 input: &prepared_input,
                 tools: &self.definitions,
                 reasoning_effort: self.reasoning_effort.as_ref(),
                 observer: Some(&self.events),
-            })
-            .await?;
+            }),
+        )
+        .await
+        .map_err(|_| LoopError::Inference(InferenceError::new("inference request timed out")))??;
 
         let usage = response.usage;
         let mut output_items = Vec::with_capacity(response.output.len());

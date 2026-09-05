@@ -8,6 +8,7 @@ use reqwest::{
 };
 use serde_json::{Map, Value, json};
 use thiserror::Error;
+use tokio::time::{Duration as TokioDuration, timeout};
 
 use super::{
     ContinuationItem, ConversationItem, InferenceBackend, InferenceError, InferenceRequest,
@@ -20,6 +21,8 @@ pub struct OpenAiResponsesBackend {
     responses_url: Url,
     input_tokens_url: Url,
 }
+
+const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
 
 impl OpenAiResponsesBackend {
     pub fn new(base_url: &str, api_key: &str) -> Result<Self, OpenAiResponsesBackendError> {
@@ -102,24 +105,40 @@ impl OpenAiResponsesBackend {
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk?;
             pending.extend_from_slice(&chunk);
-            while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+            if pending.len() > MAX_SSE_EVENT_BYTES {
+                return Err(OpenAiResponsesBackendError::MalformedStream(
+                    "SSE event exceeded the size limit",
+                ));
+            }
+            while let Some(line_end) = pending
+                .iter()
+                .position(|byte| *byte == b'\n' || *byte == b'\r')
+            {
+                // Keep a trailing CR until the next chunk so a CRLF split at
+                // the transport boundary remains one line ending.
+                if pending[line_end] == b'\r' && line_end + 1 == pending.len() {
+                    break;
+                }
+                let break_len = usize::from(
+                    pending[line_end] == b'\r' && pending.get(line_end + 1) == Some(&b'\n'),
+                ) + 1;
                 let line =
-                    String::from_utf8(pending.drain(..=newline).collect()).map_err(|_| {
+                    String::from_utf8(pending.drain(..line_end).collect()).map_err(|_| {
                         OpenAiResponsesBackendError::MalformedStream("stream was not UTF-8")
                     })?;
-                let line = line.trim_end_matches(['\r', '\n']).to_owned();
+                pending.drain(..break_len);
                 if line.is_empty() {
                     if !data.is_empty() {
                         let event = parse_stream_event(&data)?;
                         if let Some(value) = event {
                             if value.get("type").and_then(Value::as_str)
                                 == Some("response.output_text.delta")
+                                && let Some(text) = value.get("delta").and_then(Value::as_str)
+                                && let Some(observer) = observer
                             {
-                                if let Some(text) = value.get("delta").and_then(Value::as_str) {
-                                    if let Some(observer) = observer {
-                                        observer.text_delta(text).await;
-                                    }
-                                }
+                                timeout(TokioDuration::from_secs(120), observer.text_delta(text))
+                                    .await
+                                    .map_err(|_| OpenAiResponsesBackendError::ObserverTimeout)?;
                             }
                             match value.get("type").and_then(Value::as_str) {
                                 Some("response.completed") => {
@@ -144,7 +163,15 @@ impl OpenAiResponsesBackend {
                 } else if let Some(value) = line.strip_prefix("data:") {
                     let value = value.strip_prefix(' ').unwrap_or(value);
                     if value != "[DONE]" {
+                        if !data.is_empty() {
+                            data.push('\n');
+                        }
                         data.push_str(value);
+                        if data.len() > MAX_SSE_EVENT_BYTES {
+                            return Err(OpenAiResponsesBackendError::MalformedStream(
+                                "SSE event exceeded the size limit",
+                            ));
+                        }
                     }
                 }
             }
@@ -380,6 +407,8 @@ pub enum OpenAiResponsesBackendError {
     MalformedStream(&'static str),
     #[error("stream ended with an upstream error: {0}")]
     StreamTerminal(String),
+    #[error("stream observer did not accept output before the deadline")]
+    ObserverTimeout,
 }
 
 fn parse_stream_event(data: &str) -> Result<Option<Value>, OpenAiResponsesBackendError> {

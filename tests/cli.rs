@@ -288,6 +288,7 @@ fn chat_preserves_literal_prompts_and_final_text_without_reading_stdin() {
         let provider = Provider::new(4);
         let process = Process::start(provider.command(&["chat", "--", prompt]), false);
         let (socket, request) = provider.request();
+        assert_eq!(request["stream"], true);
         assert_eq!(request["input"].as_array().unwrap().len(), 1);
         assert_eq!(request["input"][0]["content"][0]["text"], prompt);
         respond(socket, "200 OK", answer(text));

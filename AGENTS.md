@@ -2,6 +2,10 @@
 
 *If `LOCAL.md` exists, read it first.*
 
+Before changing code, read and follow [`CODING_STYLE.md`](CODING_STYLE.md).
+Follow [`CONTRIBUTING.md`](CONTRIBUTING.md) for contribution workflow, commits,
+pull requests, and verification.
+
 ## Ownership and Code Shape
 
 Apply these rules to changes involving persistent mutable state, concurrency,

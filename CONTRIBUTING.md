@@ -3,6 +3,9 @@
 Thank you for contributing to Minuet. Keep changes focused, explain the intent
 behind them, and make the amount of documentation proportional to the change.
 
+Before changing code, read and follow [`CODING_STYLE.md`](CODING_STYLE.md),
+the authoritative source for Minuet's coding style conventions.
+
 ## Commits
 
 Use the following form for commit subjects:

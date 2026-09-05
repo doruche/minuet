@@ -79,9 +79,13 @@ summary for callers that do not need live observation.
 Its status label is only a projection of received events; the pending request
 controls input admission. Run progress is drained before displaying the returned
 outcome, and the outcome's tool summary is not replayed after live observation.
-Parsing, command handling and rendering share no session storage or tool registry.
-The command declaration owns grammar, aliases, help and usage; parsed external
-forms become the existing narrow kernel operations.
+Command modules own their subcommand grammar, execution and result text; the
+root only assembles and dispatches command families. They share no session
+storage or tool registry and invoke the existing narrow kernel operations.
+The clap declaration is the single source for grammar, aliases, help and usage.
+A shared help renderer derives layout from that declaration; bare groups are
+informational help requests, while invalid leaf arguments remain errors.
+The output boundary owns terminal styling and line endings.
 
 `cli::input` owns one editing component and its buffer. Grapheme-aware operations
 adapt the component's scalar cursor positions through its editing API. There is

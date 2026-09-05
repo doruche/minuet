@@ -406,7 +406,7 @@ fn pty_failure_keeps_progress_and_resize_keeps_input_usable() {
         })
         .unwrap();
     pty.parser.screen_mut().set_size(16, 30);
-    pty.send(b"/model\r");
+    pty.send(b"/model info\r");
     pty.wait_for(
         |p| p.parser.screen().contents().contains("provider: fixture"),
         "command after second resize",
@@ -464,7 +464,7 @@ fn pipes_stream_without_ansi_or_prompts_and_accept_following_commands() {
     }
     assert!(!directory.path().join("executed").exists());
     std::fs::write(directory.path().join("release"), "").unwrap();
-    input.write_all(b"/tools\n/exit\n").unwrap();
+    input.write_all(b"/tools list\n/exit\n").unwrap();
     drop(input);
     while child.0.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
@@ -488,12 +488,45 @@ fn pipes_stream_without_ansi_or_prompts_and_accept_following_commands() {
 }
 
 #[test]
+fn commands_own_queries_mutations_and_informational_group_help() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut child = pipe_fixture(directory.path());
+    let mut input = child.0.stdin.take().unwrap();
+    input.write_all(b"/tools\n/context\n/model\n/tools disable stream\n/tools list\n/tools enable stream\n/tools list\n/model effort 'vendor depth'\n/model info\n/model effort clear\n/model info\n/tools enable\n/exit\n").unwrap();
+    drop(input);
+    let mut text = String::new();
+    child
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
+    assert!(child.0.wait().unwrap().success());
+    assert!(!text.contains('\x1b'));
+    for expected in [
+        "Usage: /tools",
+        "Usage: /context",
+        "Usage: /model",
+        "tool `stream` disabled",
+        "stream (disabled)",
+        "tool `stream` enabled",
+        "stream (enabled)",
+        "reasoning effort: vendor depth",
+        "reasoning effort: upstream default",
+        "error:",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+}
+
+#[test]
 fn sigint_exits_with_pipe_stdin_still_open() {
     let directory = tempfile::tempdir().unwrap();
     let mut child = pipe_fixture(directory.path());
     let mut input = child.0.stdin.take().unwrap();
     let output = capture(child.0.stdout.take().unwrap());
-    input.write_all(b"/tools\n").unwrap();
+    input.write_all(b"/tools list\n").unwrap();
     input.flush().unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut bytes = Vec::new();

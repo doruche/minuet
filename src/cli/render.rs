@@ -1,7 +1,4 @@
-use minuet::{
-    agent_loop::{RunOutcome, RunStopReason, ToolActivity, ToolActivityStatus},
-    session::UsageSummary,
-};
+use minuet::agent_loop::{RunOutcome, RunStopReason, ToolActivity, ToolActivityStatus};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout},
@@ -12,7 +9,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::{command, handler::Effect, input::Input};
+use super::input::Input;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Tone {
@@ -141,77 +138,6 @@ pub fn draw(
         Paragraph::new(hint).style(Tone::Meta.style(colors)),
         areas[3],
     );
-}
-
-pub fn effect(effect: Effect) -> String {
-    match effect {
-        Effect::Exit => unreachable!("exit is handled by the interaction owner"),
-        Effect::Help => command::help(),
-        Effect::NewSession(id) => format!("started memory session {id}"),
-        Effect::Model(info) => format!(
-            "provider: {}\nmodel: {}\nreasoning effort: {}",
-            info.provider,
-            info.model,
-            info.reasoning_effort
-                .as_deref()
-                .unwrap_or("upstream default")
-        ),
-        Effect::ReasoningEffortSet(Some(effort)) => format!("reasoning effort set to `{effort}`"),
-        Effect::ReasoningEffortSet(None) => {
-            "reasoning effort cleared; the upstream default will be used".into()
-        },
-        Effect::Tools(tools) => tools
-            .into_iter()
-            .map(|tool| {
-                format!(
-                    "{} ({}) — {}",
-                    tool.name,
-                    if tool.enabled { "enabled" } else { "disabled" },
-                    tool.description
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Effect::ToolEnabled { name, enabled } => format!(
-            "tool `{name}` {}",
-            if enabled { "enabled" } else { "disabled" }
-        ),
-        Effect::Context(info) => {
-            let tokens = match info.committed_input_tokens {
-                minuet::kernel::InputTokenCount::Available(tokens) => {
-                    format!("{tokens} (upstream count)")
-                },
-                minuet::kernel::InputTokenCount::Unavailable(error) => {
-                    format!("unavailable ({error})")
-                },
-            };
-            format!(
-                "session: {}\ncommitted input tokens: {tokens}\n{}",
-                info.session_id,
-                usage(&info.usage)
-            )
-        },
-    }
-}
-
-fn usage(usage: &UsageSummary) -> String {
-    let latest = match usage.latest {
-        Some(latest) => format!(
-            "input {}, output {}, total {}",
-            latest.input_tokens, latest.output_tokens, latest.total_tokens
-        ),
-        None if usage.reported_calls + usage.unreported_calls == 0 => "no model calls yet".into(),
-        None => "unavailable for the latest model call".into(),
-    };
-    let qualifier = if usage.unreported_calls == 0 {
-        ""
-    } else {
-        " (partial: at least one call omitted usage)"
-    };
-    format!(
-        "last reported usage: {latest}\nsession reported usage: input {}, output {}, total {}{qualifier}",
-        usage.input_tokens, usage.output_tokens, usage.total_tokens
-    )
 }
 
 pub fn tool_result(activity: &ToolActivity, elapsed: std::time::Duration) -> (String, Tone) {

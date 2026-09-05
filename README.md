@@ -47,10 +47,13 @@ fragments (including text without a trailing newline), and `Ran`, `Failed`, or
 silently substituted for the result sent to the model. The current small builtin
 tools return immediately and do not manufacture intermediate output.
 
-`/help` lists commands; `/tools --help` and `/tools enable --help` show nested
-usage. Slash-command arguments support shell-style quoting and escaping without
-shell expansion. For example, `/model effort "vendor depth"` passes one opaque
-value. Ordinary prompts retain their leading/trailing whitespace and newlines.
+`/help` lists commands. Bare groups (`/tools`, `/context`, `/model`) show
+help; `/tools list`, `/context info`, and `/model info` perform queries.
+`/tools enable <name>` and `/tools disable <name>` change tool availability.
+Every command supports `--help`, including `/tools enable --help`. Slash-command
+arguments support shell-style quoting and escaping without shell expansion. For example, `/model effort "vendor depth"` passes one opaque
+value; the value is required (`clear` restores the upstream default). Ordinary
+prompts retain their leading/trailing whitespace and newlines.
 
 Ctrl-C exits the interface and enters the existing shutdown path. It does not
 cancel the current run; shutdown may wait for inference or a tool to finish.

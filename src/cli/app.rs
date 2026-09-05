@@ -12,7 +12,7 @@ use minuet::{
 use tokio::sync::mpsc;
 
 use super::{
-    command, handler,
+    command,
     input::{Action, Input},
     render::{self, Tone},
     terminal::Screen,
@@ -22,7 +22,7 @@ const PROGRESS_BUFFER: usize = 32;
 
 enum Reply {
     Run(RunOutcome),
-    Command(handler::Effect),
+    Command(String),
 }
 type Request = Pin<Box<dyn Future<Output = Result<Reply, KernelError>>>>;
 
@@ -135,7 +135,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                             command::Input::Command(command::Command::Exit) => return Ok(()),
                             command::Input::Command(command) => {
                                 let kernel = kernel.clone();
-                                request = Some(Box::pin(async move { handler::handle(&kernel, command).await.map(Reply::Command) }));
+                                request = Some(Box::pin(async move { command.execute(&kernel).await.map(Reply::Command) }));
                                 status = "Processing command…".into();
                             },
                             command::Input::Prompt(prompt) => {
@@ -176,8 +176,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                 status.clear();
                 match result {
                     Ok(Reply::Run(outcome)) => screen.line(&render::outcome(&outcome), Tone::Text)?,
-                    Ok(Reply::Command(handler::Effect::Exit)) => return Ok(()),
-                    Ok(Reply::Command(effect)) => screen.line(&render::effect(effect), Tone::Text)?,
+                    Ok(Reply::Command(text)) => screen.line(&text, Tone::Text)?,
                     Err(error) => screen.line(&format!("error: {error}"), Tone::Error)?,
                 }
             },

@@ -174,6 +174,17 @@ impl OpenAiResponsesBackend {
                                         .is_some_and(|output| output.is_empty())
                                         && !finalized_items.is_empty()
                                     {
+                                        if finalized_items
+                                            .keys()
+                                            .enumerate()
+                                            .any(|(expected, index)| *index != expected as u64)
+                                        {
+                                            return Err(
+                                                OpenAiResponsesBackendError::MalformedStream(
+                                                    "output indexes were not contiguous",
+                                                ),
+                                            );
+                                        }
                                         let output =
                                             finalized_items.values().cloned().collect::<Vec<_>>();
                                         response["output"] = Value::Array(output);

@@ -28,6 +28,9 @@ pub enum Command {
     /// Start a new in-memory session
     #[command(name = "/new")]
     New,
+    /// Clear the active session's conversation history
+    #[command(name = "/clear")]
+    Clear,
     /// Inspect and configure the active model
     #[command(name = "/model", subcommand)]
     Model(model::Command),
@@ -46,6 +49,7 @@ impl Command {
             Self::Tools(command) => command.execute(kernel).await,
             Self::Context(command) => command.execute(kernel).await,
             Self::New => session::new(kernel).await,
+            Self::Clear => session::clear(kernel).await,
             Self::Exit | Self::Help => unreachable!("handled by the interaction/parser boundary"),
         }
     }
@@ -155,6 +159,7 @@ mod tests {
             parse("/context info"),
             Input::Command(Command::Context(context::Command::Info))
         );
+        assert_eq!(parse("/clear"), Input::Command(Command::Clear));
         assert_eq!(
             parse("/model info"),
             Input::Command(Command::Model(model::Command::Info))

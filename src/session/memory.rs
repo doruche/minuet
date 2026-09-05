@@ -51,6 +51,13 @@ impl SessionStore for MemorySessionStore {
         Ok(())
     }
 
+    fn clear(&mut self, id: SessionId) -> Result<(), SessionStoreError> {
+        let session = self.session_mut(id)?;
+        session.items.clear();
+        session.usage = super::UsageSummary::default();
+        Ok(())
+    }
+
     fn commit_inference(
         &mut self,
         id: SessionId,

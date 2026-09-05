@@ -560,9 +560,15 @@ fn pty_markdown_publishes_blocks_links_and_highlighting_then_restores_input() {
             .lines()
             .position(|line| line.contains("fn main"))
             .unwrap() as u16;
+        let code_column = screen
+            .contents()
+            .lines()
+            .nth(code_row as usize)
+            .and_then(|line| line.find("fn main"))
+            .unwrap() as u16;
         assert_eq!(
             matches!(
-                screen.cell(code_row, 0).unwrap().fgcolor(),
+                screen.cell(code_row, code_column).unwrap().fgcolor(),
                 vt100::Color::Rgb(..)
             ),
             colors

@@ -70,6 +70,8 @@ pub trait SessionStore: Send {
         items: &[ConversationItem],
     ) -> Result<(), SessionStoreError>;
 
+    fn clear(&mut self, id: SessionId) -> Result<(), SessionStoreError>;
+
     fn commit_inference(
         &mut self,
         id: SessionId,
@@ -129,5 +131,39 @@ mod tests {
         assert_eq!(summary.unreported_calls, 1);
         assert_eq!(summary.total_tokens, 0);
         assert_eq!(summary.latest, None);
+    }
+
+    #[test]
+    fn clearing_a_session_removes_history_and_usage_but_keeps_settings() {
+        let mut store = MemorySessionStore::default();
+        let id = store
+            .create(Some(ReasoningEffort::new("careful").unwrap()))
+            .unwrap();
+        store
+            .append(id, &[ConversationItem::UserText("old".into())])
+            .unwrap();
+        store
+            .commit_inference(
+                id,
+                &[ConversationItem::FunctionCallOutput {
+                    call_id: "call".into(),
+                    output: "answer".into(),
+                }],
+                Some(TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    total_tokens: 3,
+                }),
+            )
+            .unwrap();
+
+        store.clear(id).unwrap();
+        let snapshot = store.snapshot(id).unwrap();
+        assert!(snapshot.items.is_empty());
+        assert_eq!(snapshot.usage, UsageSummary::default());
+        assert_eq!(
+            snapshot.reasoning_effort,
+            Some(ReasoningEffort::new("careful").unwrap())
+        );
     }
 }

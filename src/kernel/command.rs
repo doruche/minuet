@@ -32,6 +32,10 @@ impl KernelHandle {
         self.request((), Command::NewSession).await
     }
 
+    pub async fn clear_session(&self) -> Result<(), KernelError> {
+        self.request((), Command::ClearSession).await
+    }
+
     pub async fn model_info(&self) -> Result<ModelInfo, KernelError> {
         self.request((), Command::ModelInfo).await
     }
@@ -123,6 +127,7 @@ pub(super) struct SetToolEnabled {
 pub(super) enum Command {
     Run(Envelope<RunRequest, RunOutcome>),
     NewSession(Envelope<(), SessionId>),
+    ClearSession(Envelope<(), ()>),
     ModelInfo(Envelope<(), ModelInfo>),
     SetReasoningEffort(Envelope<Option<ReasoningEffort>, ()>),
     ListTools(Envelope<(), Vec<ToolStatus>>),

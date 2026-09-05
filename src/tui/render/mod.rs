@@ -14,6 +14,9 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// Keep model output aligned with the user's two-column `> ` input prefix.
+pub(super) const CONTENT_PREFIX: u16 = 2;
+
 /// An immutable view of the pending request, borrowed for one redraw.
 #[derive(Clone, Copy)]
 pub struct Status<'a> {
@@ -158,9 +161,16 @@ pub fn draw(
         Constraint::Length(u16::from(frame.area().height > 1)),
     ])
     .split(frame.area());
+    let prefix = u16::from(tail.tone == Tone::Text) * CONTENT_PREFIX;
+    let output_area = ratatui::layout::Rect::new(
+        areas[0].x + prefix.min(areas[0].width),
+        areas[0].y,
+        areas[0].width.saturating_sub(prefix),
+        areas[0].height,
+    );
     frame.render_widget(
         Paragraph::new(tail.text.as_str()).style(tail.tone.style(colors)),
-        areas[0],
+        output_area,
     );
     if let Some(status) = status {
         frame.render_widget(
@@ -239,7 +249,7 @@ mod tests {
             let buffer = terminal.backend().buffer();
             let output: String = (0..20).map(|x| buffer[(x, 0)].symbol()).collect();
             let status: String = (0..20).map(|x| buffer[(x, 1)].symbol()).collect();
-            assert_eq!(output.trim_end(), "partial output");
+            assert_eq!(output.trim_end(), "  partial output");
             assert!(status.starts_with(&format!("⠋ {time} · ")), "{status}");
         }
     }

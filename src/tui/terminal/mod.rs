@@ -25,7 +25,7 @@ use ratatui::{
 
 use super::{
     input::Input,
-    render::{self, OutputTail, Tone},
+    render::{self, CONTENT_PREFIX, OutputTail, Tone},
 };
 
 pub struct Screen {
@@ -148,11 +148,21 @@ impl Screen {
         let output = (|| {
             for (index, block) in render::markdown::blocks(source).enumerate() {
                 let block = block.map_err(io::Error::other)?;
-                let width = self.terminal.size()?.width;
+                let width = self.terminal.size()?.width.saturating_sub(CONTENT_PREFIX);
                 if index > 0 {
+                    write!(
+                        self.terminal.backend_mut(),
+                        "{}",
+                        " ".repeat(CONTENT_PREFIX as usize)
+                    )?;
                     markdown::write_row(self.terminal.backend_mut(), &Vec::new(), self.colors)?;
                 }
                 for row in block.rows(width) {
+                    write!(
+                        self.terminal.backend_mut(),
+                        "{}",
+                        " ".repeat(CONTENT_PREFIX as usize)
+                    )?;
                     markdown::write_row(self.terminal.backend_mut(), &row, self.colors)?;
                 }
                 Write::flush(self.terminal.backend_mut())?;
@@ -233,13 +243,20 @@ impl Screen {
     fn append(&mut self, text: &str) -> io::Result<()> {
         self.terminal.autoresize()?;
         let width = self.terminal.size()?.width;
-        let rows = self.tail.push(text, width);
+        let prefix = u16::from(self.tail.tone == Tone::Text) * CONTENT_PREFIX;
+        let rows = self.tail.push(text, width.saturating_sub(prefix));
         // Bound insertion buffers even when a final result contains many lines.
         for batch in rows.chunks(128) {
             self.terminal.insert_before(batch.len() as u16, |buffer| {
                 let lines: Vec<_> = batch
                     .iter()
-                    .map(|text| render::line(text.clone(), self.tail.tone, self.colors))
+                    .map(|text| {
+                        render::line(
+                            format!("{}{}", " ".repeat(prefix as usize), text),
+                            self.tail.tone,
+                            self.colors,
+                        )
+                    })
                     .collect();
                 Paragraph::new(lines).render(buffer.area, buffer);
             })?;

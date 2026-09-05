@@ -111,6 +111,9 @@ impl KernelTask {
                 Command::NewSession(Envelope { reply, .. }) => {
                     let _ = reply.send(self.new_session());
                 },
+                Command::ClearSession(Envelope { reply, .. }) => {
+                    let _ = reply.send(self.clear_session());
+                },
                 Command::ModelInfo(Envelope { reply, .. }) => {
                     let _ = reply.send(self.model_info());
                 },
@@ -155,6 +158,10 @@ impl KernelTask {
         let id = self.store.create(self.default_reasoning_effort.clone())?;
         self.active_session = id;
         Ok(id)
+    }
+
+    fn clear_session(&mut self) -> Result<(), KernelError> {
+        self.store.clear(self.active_session).map_err(Into::into)
     }
 
     fn model_info(&self) -> Result<ModelInfo, KernelError> {

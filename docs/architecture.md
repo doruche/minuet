@@ -25,8 +25,13 @@ replaceable policy or external adaptation.
 
 Provider identity and protocol are deliberately separate. A configured provider
 selects an endpoint and credential environment variable; `openai-responses`
-selects the adapter. Model names and reasoning effort are opaque strings passed
-to that adapter, not entries in a locally maintained capability matrix.
+selects the adapter. `config` resolves the selected provider's environment
+variable once at load and owns a private credential snapshot, redacted in debug
+output. The runtime provider configuration carries the resolved value rather
+than an environment variable reference; changing credentials requires loading
+a new configuration and constructing a new backend. Model names and reasoning
+effort are opaque strings passed to that adapter, not entries in a locally
+maintained capability matrix.
 
 ## Kernel commands and lifetime
 

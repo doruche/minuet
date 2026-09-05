@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, env, fs, io, path::PathBuf};
+use std::{collections::BTreeMap, env, fmt, fs, io, path::PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -8,6 +8,8 @@ use crate::model::{IdentifierError, ModelName, ModelSelection, ProviderId, Reaso
 const HOME_ENV: &str = "MINUET_HOME";
 const CONFIG_FILE: &str = "config.toml";
 
+/// A startup snapshot. Loading resolves the selected provider's credentials;
+/// later environment changes do not refresh this configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub home: PathBuf,
@@ -18,16 +20,29 @@ pub struct Config {
     pub provider: ProviderConfig,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProviderConfig {
     pub protocol: Protocol,
     pub base_url: String,
-    pub api_key_env: String,
+    // Resolved once from RawProviderConfig::api_key_env at load. This owned
+    // snapshot is authoritative for credentials; there is no runtime refresh.
+    api_key: String,
 }
 
 impl ProviderConfig {
-    pub fn api_key(&self) -> Result<String, ConfigError> {
-        env::var(&self.api_key_env).map_err(|_| ConfigError::ApiKeyNotSet(self.api_key_env.clone()))
+    pub fn api_key(&self) -> &str {
+        &self.api_key
+    }
+}
+
+impl fmt::Debug for ProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderConfig")
+            .field("protocol", &self.protocol)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -66,10 +81,14 @@ impl Config {
             path: path.clone(),
             source,
         })?;
-        Self::from_raw(home, raw)
+        Self::from_raw(home, raw, |name| env::var(name))
     }
 
-    fn from_raw(home: PathBuf, raw: RawConfig) -> Result<Self, ConfigError> {
+    fn from_raw(
+        home: PathBuf,
+        raw: RawConfig,
+        read_env: impl FnOnce(&str) -> Result<String, env::VarError>,
+    ) -> Result<Self, ConfigError> {
         let provider_id = ProviderId::new(raw.model_provider)?;
         let model = ModelName::new(raw.model)?;
         let default_reasoning_effort = raw
@@ -94,6 +113,19 @@ impl Config {
             ensure_non_empty("enabled tool name", tool)?;
         }
 
+        let api_key = read_env(&raw_provider.api_key_env).map_err(|error| match error {
+            env::VarError::NotPresent => {
+                ConfigError::ApiKeyNotSet(raw_provider.api_key_env.clone())
+            },
+            // Never retain the invalid value: it may contain the credential.
+            env::VarError::NotUnicode(_) => {
+                ConfigError::ApiKeyNotUnicode(raw_provider.api_key_env.clone())
+            },
+        })?;
+        if api_key.trim().is_empty() {
+            return Err(ConfigError::EmptyApiKey(raw_provider.api_key_env.clone()));
+        }
+
         Ok(Self {
             home,
             model: ModelSelection {
@@ -106,7 +138,7 @@ impl Config {
             provider: ProviderConfig {
                 protocol,
                 base_url: raw_provider.base_url.clone(),
-                api_key_env: raw_provider.api_key_env.clone(),
+                api_key,
             },
         })
     }
@@ -185,6 +217,10 @@ pub enum ConfigError {
     EmptyField(&'static str),
     #[error("API key environment variable `{0}` is not set")]
     ApiKeyNotSet(String),
+    #[error("API key environment variable `{0}` is not valid Unicode")]
+    ApiKeyNotUnicode(String),
+    #[error("API key environment variable `{0}` must not be empty")]
+    EmptyApiKey(String),
     #[error("loop.max_steps must be greater than zero")]
     ZeroMaxSteps,
 }
@@ -195,7 +231,9 @@ mod tests {
 
     fn parse(contents: &str) -> Result<Config, ConfigError> {
         let raw = toml::from_str(contents).unwrap();
-        Config::from_raw(PathBuf::from("/tmp/minuet-test"), raw)
+        Config::from_raw(PathBuf::from("/tmp/minuet-test"), raw, |_| {
+            Ok("test-key".into())
+        })
     }
 
     #[test]
@@ -266,5 +304,68 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, ConfigError::UnsupportedProtocol(_)));
+    }
+
+    const SNAPSHOT_CONFIG: &str = r#"
+        model = "test-model"
+        model_provider = "selected"
+        [model_providers.selected]
+        protocol = "openai-responses"
+        base_url = "https://example.test/v1"
+        api_key_env = "SELECTED_KEY"
+        [model_providers.unused]
+        protocol = "openai-responses"
+        base_url = "https://unused.test/v1"
+        api_key_env = "UNUSED_KEY"
+    "#;
+
+    #[test]
+    fn credentials_are_resolved_once_for_only_the_selected_provider() {
+        let mut environment = BTreeMap::from([("SELECTED_KEY", "original-test-secret".to_owned())]);
+        let mut reads = 0;
+        let config = Config::from_raw(
+            PathBuf::from("/tmp/minuet-test"),
+            toml::from_str(SNAPSHOT_CONFIG).unwrap(),
+            |name| {
+                reads += 1;
+                assert_eq!(name, "SELECTED_KEY");
+                environment
+                    .get(name)
+                    .cloned()
+                    .ok_or(env::VarError::NotPresent)
+            },
+        )
+        .unwrap();
+        environment.insert("SELECTED_KEY", "replacement-test-secret".into());
+        assert_eq!(config.provider.api_key(), "original-test-secret");
+        let cloned = config.clone();
+        environment.clear();
+        assert_eq!(cloned.provider.api_key(), "original-test-secret");
+        assert_eq!(reads, 1);
+        let diagnostic = format!("{config:?} {cloned:#?}");
+        assert!(diagnostic.contains("[REDACTED]"));
+        assert!(!diagnostic.contains("original-test-secret"));
+    }
+
+    #[test]
+    fn credential_errors_fail_loading_without_disclosing_values() {
+        let load = |value| {
+            Config::from_raw(
+                PathBuf::from("/tmp/minuet-test"),
+                toml::from_str(SNAPSHOT_CONFIG).unwrap(),
+                |_| value,
+            )
+        };
+        assert!(
+            matches!(load(Err(env::VarError::NotPresent)), Err(ConfigError::ApiKeyNotSet(name)) if name == "SELECTED_KEY")
+        );
+        for value in ["", " \t\n"] {
+            assert!(
+                matches!(load(Ok(value.into())), Err(ConfigError::EmptyApiKey(name)) if name == "SELECTED_KEY")
+            );
+        }
+        let error = load(Err(env::VarError::NotUnicode("invalid-test-secret".into()))).unwrap_err();
+        assert!(matches!(&error, ConfigError::ApiKeyNotUnicode(name) if name == "SELECTED_KEY"));
+        assert!(!format!("{error} {error:?}").contains("invalid-test-secret"));
     }
 }

@@ -23,13 +23,10 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn Error>> {
     let config = Config::load()?;
     let backend: Arc<dyn InferenceBackend> = match config.provider.protocol {
-        Protocol::OpenAiResponses => {
-            let api_key = config.provider.api_key()?;
-            Arc::new(OpenAiResponsesBackend::new(
-                &config.provider.base_url,
-                &api_key,
-            )?)
-        },
+        Protocol::OpenAiResponses => Arc::new(OpenAiResponsesBackend::new(
+            &config.provider.base_url,
+            config.provider.api_key(),
+        )?),
     };
     let tools = ToolRegistry::with_builtins(&config.enabled_tools)?;
     let agent_loop = Arc::new(ReactLoop::new(config.loop_max_steps)?);

@@ -24,8 +24,10 @@ nix develop -c cargo run
 ```
 
 API keys are never stored in `config.toml`; each provider configuration names
-the environment variable from which its key is read. Configuration and all
-session changes are read-only/in-memory in this version.
+the environment variable from which its key is read. Loading configuration
+resolves the selected provider's key once; missing, empty or non-Unicode values
+fail startup. Environment changes after loading do not update that snapshot.
+Configuration and all session changes are read-only/in-memory in this version.
 
 At the prompt, `/help` lists commands. In particular, `/model effort <value>`
 passes an uninterpreted string to the upstream provider, while `/context info`

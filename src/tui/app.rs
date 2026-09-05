@@ -1,4 +1,9 @@
-use std::{future::Future, io, pin::Pin};
+use std::{
+    future::Future,
+    io,
+    pin::Pin,
+    time::{Duration, Instant},
+};
 
 use crossterm::event::{self, Event};
 use minuet::{
@@ -17,10 +22,36 @@ use super::{
 const PROGRESS_BUFFER: usize = 32;
 
 enum Reply {
-    Run(RunOutcome),
-    Command(String),
+    Run(Result<RunOutcome, KernelError>),
+    Command(Result<String, KernelError>),
 }
-type Request = Pin<Box<dyn Future<Output = Result<Reply, KernelError>>>>;
+
+struct Request {
+    reply: Pin<Box<dyn Future<Output = Reply>>>,
+    // Local waiting time, from submission until the reply is observed. This is
+    // presentation data, not provider execution time or a timeout deadline.
+    started: Instant,
+    // A projection of received events that may lag execution. Only the pending
+    // request, never this label, controls input admission and completion.
+    label: String,
+}
+
+impl Request {
+    fn new(reply: impl Future<Output = Reply> + 'static, label: &str) -> Self {
+        Self {
+            reply: Box::pin(reply),
+            started: Instant::now(),
+            label: label.into(),
+        }
+    }
+
+    fn status(&self) -> render::Status<'_> {
+        render::Status {
+            label: &self.label,
+            elapsed: self.started.elapsed(),
+        }
+    }
+}
 
 async fn next_event() -> io::Result<Event> {
     loop {
@@ -54,16 +85,17 @@ pub async fn run(kernel: KernelHandle) -> io::Result<()> {
 async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
     let mut input = Input::default();
     let mut request: Option<Request> = None;
+    // An observer exists only for the active run. Completion drains and drops
+    // it before accepting another request; it never determines run completion.
     let mut events: Option<mpsc::Receiver<RunEvent>> = None;
-    // A presentation of received events, never execution authority. Request
-    // ownership (the pending future), not this label, governs input admission.
-    let mut status = String::new();
+    let mut redraw = tokio::time::interval(Duration::from_millis(100));
+    redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
     screen.line("Minuet — /help for commands", Tone::Meta)?;
 
     loop {
-        screen.draw(&input, &status, request.is_some())?;
+        screen.draw(&input, request.as_ref().map(Request::status))?;
         tokio::select! {
             biased;
             signal = &mut interrupt => {
@@ -91,15 +123,19 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                             command::Input::Command(command::Command::Exit) => return Ok(()),
                             command::Input::Command(command) => {
                                 let kernel = kernel.clone();
-                                request = Some(Box::pin(async move { command.execute(&kernel).await.map(Reply::Command) }));
-                                status = "Processing command…".into();
+                                request = Some(Request::new(
+                                    async move { Reply::Command(command.execute(&kernel).await) },
+                                    "Processing command…",
+                                ));
                             },
                             command::Input::Prompt(prompt) => {
                                 let (sender, receiver) = mpsc::channel(PROGRESS_BUFFER);
                                 events = Some(receiver);
                                 let kernel = kernel.clone();
-                                request = Some(Box::pin(async move { kernel.run(RunRequest::with_events(prompt, sender)).await.map(Reply::Run) }));
-                                status = "Starting…".into();
+                                request = Some(Request::new(
+                                    async move { Reply::Run(kernel.run(RunRequest::with_events(prompt, sender)).await) },
+                                    "Starting…",
+                                ));
                             },
                         }
                     },
@@ -108,12 +144,13 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
             event = async { events.as_mut().unwrap().recv().await }, if events.is_some() => {
                 match event {
                     Some(event) => {
-                        progress(screen, &mut status, event)?;
+                        let label = &mut request.as_mut().unwrap().label;
+                        progress(screen, label, event)?;
                         // Combine a bounded batch of ready updates per redraw;
                         // input and SIGINT remain serviced between batches.
                         for _ in 1..PROGRESS_BUFFER {
                             match events.as_mut().unwrap().try_recv() {
-                                Ok(event) => progress(screen, &mut status, event)?,
+                                Ok(event) => progress(screen, label, event)?,
                                 Err(_) => break,
                             }
                         }
@@ -121,17 +158,17 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                     None => events = None,
                 }
             },
-            result = async { request.as_mut().unwrap().await }, if request.is_some() => {
+            reply = async { request.as_mut().unwrap().reply.as_mut().await }, if request.is_some() => {
+                let mut completed = request.take().unwrap();
+                let elapsed = render::elapsed(completed.started.elapsed());
                 // A result can be ready alongside the last events. Drain those
                 // before displaying completion; never replay RunOutcome's tool
                 // summary after its live events have already been presented.
                 if let Some(mut remaining) = events.take() {
-                    while let Ok(event) = remaining.try_recv() { progress(screen, &mut status, event)?; }
+                    while let Ok(event) = remaining.try_recv() { progress(screen, &mut completed.label, event)?; }
                 }
-                request = None;
-                status.clear();
-                match result {
-                    Ok(Reply::Run(outcome)) => {
+                match reply {
+                    Reply::Run(Ok(outcome)) => {
                         if outcome.text.is_empty() {
                             screen.line("(no text output)", Tone::Meta)?;
                         } else {
@@ -139,12 +176,20 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                         }
                         if outcome.stop_reason == RunStopReason::StepLimit {
                             screen.line("run stopped: model-turn limit reached; pending tool calls were not executed", Tone::Error)?;
+                            screen.line(&format!("Stopped · {elapsed}"), Tone::Meta)?;
+                        } else {
+                            screen.line(&format!("Completed · {elapsed}"), Tone::Meta)?;
                         }
                     },
-                    Ok(Reply::Command(text)) => screen.line(&text, Tone::Text)?,
-                    Err(error) => screen.line(&format!("error: {error}"), Tone::Error)?,
+                    Reply::Run(Err(error)) => {
+                        screen.line(&format!("error: {error}"), Tone::Error)?;
+                        screen.line(&format!("Failed · {elapsed}"), Tone::Error)?;
+                    },
+                    Reply::Command(Ok(text)) => screen.line(&text, Tone::Text)?,
+                    Reply::Command(Err(error)) => screen.line(&format!("error: {error}"), Tone::Error)?,
                 }
             },
+            _ = redraw.tick(), if request.is_some() => {},
         }
     }
 }

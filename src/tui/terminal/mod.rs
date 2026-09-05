@@ -176,9 +176,9 @@ impl Screen {
         Ok(())
     }
 
-    pub fn draw(&mut self, input: &Input, status: &str, busy: bool) -> io::Result<()> {
+    pub fn draw(&mut self, input: &Input, status: Option<render::Status<'_>>) -> io::Result<()> {
         execute!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
-        let draw = self.draw_frame(input, status, busy);
+        let draw = self.draw_frame(input, status);
         let end = execute!(self.terminal.backend_mut(), EndSynchronizedUpdate);
         draw.and(end)
     }
@@ -198,14 +198,14 @@ impl Screen {
         self.mode.restore()
     }
 
-    fn draw_frame(&mut self, input: &Input, status: &str, busy: bool) -> io::Result<()> {
+    fn draw_frame(&mut self, input: &Input, status: Option<render::Status<'_>>) -> io::Result<()> {
         self.append("")?;
         let size = self.terminal.size()?;
         let layout = render::InputLayout::new(input, size.width);
-        let height = (if busy { 1 } else { layout.height() }
+        let height = (if status.is_some() { 1 } else { layout.height() }
             + 1
             + u16::from(!self.tail.text.is_empty())
-            + u16::from(!status.is_empty()))
+            + u16::from(status.is_some()))
         .min(size.height)
         .max(1);
         if height != self.terminal.get_frame().area().height {
@@ -225,15 +225,7 @@ impl Screen {
         }
         let shift_enter = cfg!(windows) || self.mode.keyboard_enhanced;
         self.terminal.draw(|frame| {
-            render::draw(
-                frame,
-                &layout,
-                status,
-                &self.tail,
-                busy,
-                self.colors,
-                shift_enter,
-            )
+            render::draw(frame, &layout, status, &self.tail, self.colors, shift_enter)
         })?;
         Ok(())
     }

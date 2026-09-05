@@ -72,7 +72,9 @@ fn backend(directory: PathBuf) -> (OpenAiResponsesBackend, std::thread::JoinHand
             .unwrap_or_else(|_| json!({"status":"completed", "output":[{"type":"function_call", "call_id":"call-stream", "name":"stream", "arguments":"{}"}]}));
         let responses = [
             first,
-            json!({"status":"completed", "output":[{"type":"message", "content":[{"type":"output_text", "text": std::fs::read_to_string(directory.join("answer.md")).unwrap_or_else(|_| "assistant-finished".into())}]}]}),
+            std::fs::read(directory.join("second-response.json"))
+                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap())
+                .unwrap_or_else(|_| json!({"status":"completed", "output":[{"type":"message", "content":[{"type":"output_text", "text": std::fs::read_to_string(directory.join("answer.md")).unwrap_or_else(|_| "assistant-finished".into())}]}]})),
         ];
         for (index, response) in responses.into_iter().enumerate() {
             let (mut socket, _) = listener.accept().unwrap();
@@ -91,6 +93,9 @@ fn backend(directory: PathBuf) -> (OpenAiResponsesBackend, std::thread::JoinHand
             let mut body = vec![0; length];
             reader.read_exact(&mut body).unwrap();
             std::fs::write(directory.join(format!("request-{index}.json")), body).unwrap();
+            while directory.join(format!("hold-response-{index}")).exists() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
             let body = response.to_string();
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         }
@@ -300,6 +305,23 @@ impl Pty {
     fn frame_complete(&self) -> bool {
         self.raw.ends_with(b"\x1b[?2026l")
     }
+
+    fn activity(&self, phase: &str) -> Option<(char, u64)> {
+        if !self.frame_complete() {
+            return None;
+        }
+        self.parser.screen().contents().lines().find_map(|line| {
+            let (activity, label) = line.split_once(" · ")?;
+            if label.trim_end() != phase {
+                return None;
+            }
+            let mut fields = activity.split_whitespace();
+            let frame = fields.next()?.chars().next()?;
+            let seconds = fields.next()?.strip_suffix('s')?.parse().ok()?;
+            Some((frame, seconds))
+        })
+    }
+
     fn release(&self) {
         std::fs::write(self.directory.path().join("release"), "").unwrap();
     }
@@ -323,6 +345,176 @@ impl Pty {
             "bracketed paste not restored"
         );
     }
+}
+
+#[test]
+fn pty_status_ticks_without_output_and_keeps_total_time_across_phases() {
+    let mut pty = Pty::start_with_options(false, Some(false), false);
+    pty.ready();
+    for index in 0..2 {
+        std::fs::write(
+            pty.directory.path().join(format!("hold-response-{index}")),
+            "",
+        )
+        .unwrap();
+    }
+    pty.send(b"timed run\r");
+    pty.wait_for(
+        |p| p.activity("Waiting for model…").is_some(),
+        "model waiting status",
+    );
+    let first_frame = pty.activity("Waiting for model…").unwrap().0;
+    pty.wait_for(
+        |p| {
+            p.activity("Waiting for model…")
+                .is_some_and(|(frame, _)| frame != first_frame)
+        },
+        "animation without model output or input",
+    );
+    pty.wait_for(
+        |p| {
+            p.activity("Waiting for model…")
+                .is_some_and(|(_, seconds)| seconds >= 1)
+        },
+        "elapsed time without model output or input",
+    );
+    let model_seconds = pty.activity("Waiting for model…").unwrap().1;
+    assert_eq!(
+        pty.parser
+            .screen()
+            .contents()
+            .matches("Waiting for model…")
+            .count(),
+        1
+    );
+    std::fs::remove_file(pty.directory.path().join("hold-response-0")).unwrap();
+    pty.wait_for(|p| p.activity("Running stream…").is_some(), "tool status");
+    assert!(pty.activity("Running stream…").unwrap().1 >= model_seconds);
+    pty.wait_for(
+        |p| {
+            p.activity("Running stream…")
+                .is_some_and(|(_, seconds)| seconds > model_seconds)
+        },
+        "elapsed time during a quiet tool",
+    );
+    let tool_seconds = pty.activity("Running stream…").unwrap().1;
+    assert!(pty.parser.screen().contents().contains("执行片段-alpha"));
+    pty.release();
+    pty.wait_for(
+        |p| p.activity("Waiting for model…").is_some(),
+        "second model call",
+    );
+    assert!(pty.activity("Waiting for model…").unwrap().1 >= tool_seconds);
+    std::fs::remove_file(pty.directory.path().join("hold-response-1")).unwrap();
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains("Completed · "),
+        "completion time",
+    );
+    let contents = pty.parser.screen().contents();
+    assert!(contents.contains("assistant-finished"));
+    assert!(contents.contains("Ctrl-O"));
+    assert!(!contents.contains("Waiting for model…"));
+    assert_eq!(contents.matches("Completed · ").count(), 1);
+    let seconds: u64 = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("Completed · "))
+        .unwrap()
+        .trim_end()
+        .strip_suffix('s')
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(seconds >= tool_seconds);
+    pty.send(b"/model info\r");
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains("provider: fixture"),
+        "command after timed run",
+    );
+    assert_eq!(
+        pty.parser
+            .screen()
+            .contents()
+            .matches("Completed · ")
+            .count(),
+        1
+    );
+    pty.send(b"/exit\r");
+    pty.finish();
+}
+
+#[test]
+fn pty_new_run_resets_time_and_model_failure_retains_elapsed_summary() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("first-response.json"),
+        r#"{"status":"completed","output":[]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("second-response.json"),
+        r#"{"status":"failed","output":[]}"#,
+    )
+    .unwrap();
+    for index in 0..2 {
+        std::fs::write(directory.path().join(format!("hold-response-{index}")), "").unwrap();
+    }
+    let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+    command.args(["--exact", "terminal_fixture", "--nocapture"]);
+    command.env(FIXTURE_ENV, directory.path());
+    let mut pty = Pty::start_process(command, directory, Some(false), true);
+    pty.ready();
+    pty.send(b"first\r");
+    pty.wait_for(
+        |p| {
+            p.activity("Waiting for model…")
+                .is_some_and(|(_, seconds)| seconds >= 1)
+        },
+        "first run time",
+    );
+    let first_seconds = pty.activity("Waiting for model…").unwrap().1;
+    std::fs::remove_file(pty.directory.path().join("hold-response-0")).unwrap();
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains("Completed · "),
+        "empty response completion",
+    );
+    assert!(pty.parser.screen().contents().contains("(no text output)"));
+    pty.send(b"second\r");
+    pty.wait_for(
+        |p| p.activity("Waiting for model…").is_some(),
+        "next run status",
+    );
+    assert!(pty.activity("Waiting for model…").unwrap().1 < first_seconds);
+    pty.wait_for(
+        |p| {
+            p.activity("Waiting for model…")
+                .is_some_and(|(_, seconds)| seconds >= 1)
+        },
+        "second run time",
+    );
+    let failed_seconds = pty.activity("Waiting for model…").unwrap().1;
+    std::fs::remove_file(pty.directory.path().join("hold-response-1")).unwrap();
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains("Failed · "),
+        "failure time",
+    );
+    let contents = pty.parser.screen().contents();
+    assert!(contents.contains("error:"));
+    assert!(contents.contains("Ctrl-O"));
+    assert!(!contents.contains("Waiting for model…"));
+    assert_eq!(contents.matches("Completed · ").count(), 1);
+    assert_eq!(contents.matches("Failed · ").count(), 1);
+    let seconds: u64 = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("Failed · "))
+        .unwrap()
+        .trim_end()
+        .strip_suffix('s')
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(seconds >= failed_seconds);
+    pty.send(b"/exit\r");
+    pty.finish();
 }
 
 #[test]
@@ -438,10 +630,12 @@ fn pty_unclosed_model_code_cannot_capture_the_run_limit_notice() {
     pty.ready();
     pty.send(b"limited\r");
     pty.wait_for(
-        |p| p.frame_complete() && p.parser.screen().contents().contains("run stopped:"),
+        |p| p.frame_complete() && p.parser.screen().contents().contains("Stopped · "),
         "limit notice",
     );
     let contents = pty.parser.screen().contents();
+    assert!(!contents.contains("Completed · "));
+    assert!(!contents.contains("Waiting for model…"));
     assert!(
         contents.contains("fn partial() {}\nrun stopped:"),
         "{contents:?}"

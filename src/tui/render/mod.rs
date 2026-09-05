@@ -14,6 +14,44 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// An immutable view of the pending request, borrowed for one redraw.
+#[derive(Clone, Copy)]
+pub struct Status<'a> {
+    pub label: &'a str,
+    pub elapsed: std::time::Duration,
+}
+
+impl Status<'_> {
+    fn text(self) -> String {
+        // Animation signals an outstanding request, not remote progress. Derive
+        // its frame from elapsed time so there is no second mutable clock.
+        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let frame = frames[(self.elapsed.as_millis() / 100 % frames.len() as u128) as usize];
+        // Keep waiting time visible when the terminal clips a long phase label.
+        format!(
+            "{frame} {} · {}",
+            elapsed(self.elapsed),
+            safe_text(self.label)
+        )
+    }
+}
+
+pub fn elapsed(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds >= 3600 {
+        format!(
+            "{}h {:02}m {:02}s",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        )
+    } else if seconds >= 60 {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Tone {
     #[default]
@@ -108,15 +146,14 @@ impl OutputTail {
 pub fn draw(
     frame: &mut Frame,
     input: &InputLayout,
-    status: &str,
+    status: Option<Status<'_>>,
     tail: &OutputTail,
-    busy: bool,
     colors: bool,
     shift_enter: bool,
 ) {
     let areas = Layout::vertical([
         Constraint::Length(u16::from(!tail.text.is_empty())),
-        Constraint::Length(u16::from(!status.is_empty())),
+        Constraint::Length(u16::from(status.is_some())),
         Constraint::Min(1),
         Constraint::Length(u16::from(frame.area().height > 1)),
     ])
@@ -125,14 +162,15 @@ pub fn draw(
         Paragraph::new(tail.text.as_str()).style(tail.tone.style(colors)),
         areas[0],
     );
-    frame.render_widget(
-        Paragraph::new(safe_text(status)).style(Tone::Meta.style(colors)),
-        areas[1],
-    );
-    if !busy {
+    if let Some(status) = status {
+        frame.render_widget(
+            Paragraph::new(status.text()).style(Tone::Meta.style(colors)),
+            areas[1],
+        );
+    } else {
         input.draw(frame, areas[2], colors);
     }
-    let hint = if busy {
+    let hint = if status.is_some() {
         "Ctrl-C: exit and wait for shutdown"
     } else if shift_enter {
         "Enter: send · Shift-Enter / Ctrl-O: newline · Ctrl-C: exit"
@@ -166,6 +204,45 @@ pub fn line(text: String, tone: Tone, colors: bool) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrow_status_keeps_elapsed_time_beside_unfinished_output() {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 4)).unwrap();
+        let input = InputLayout::new(&crate::tui::input::Input::default(), 20);
+        let tail = OutputTail {
+            text: "partial output".into(),
+            tone: Tone::Text,
+        };
+        for (seconds, time) in [
+            (59, "59s"),
+            (60, "1m 00s"),
+            (3599, "59m 59s"),
+            (3600, "1h 00m 00s"),
+            (3661, "1h 01m 01s"),
+        ] {
+            terminal
+                .draw(|frame| {
+                    draw(
+                        frame,
+                        &input,
+                        Some(Status {
+                            label: "Waiting for model…",
+                            elapsed: std::time::Duration::from_secs(seconds),
+                        }),
+                        &tail,
+                        false,
+                        false,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let output: String = (0..20).map(|x| buffer[(x, 0)].symbol()).collect();
+            let status: String = (0..20).map(|x| buffer[(x, 1)].symbol()).collect();
+            assert_eq!(output.trim_end(), "partial output");
+            assert!(status.starts_with(&format!("⠋ {time} · ")), "{status}");
+        }
+    }
 
     #[test]
     fn displays_unterminated_fragments_and_preserves_combining_boundaries() {

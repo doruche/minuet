@@ -94,6 +94,13 @@ fragments (including text without a trailing newline), and `Ran`, `Failed`, or
 silently substituted for the result sent to the model. The current small builtin
 tools return immediately and do not manufacture intermediate output.
 
+While a request is pending, the status line shows an activity indicator, elapsed
+waiting time and the current phase. Time runs from submission until the TUI
+receives the result, across all model calls and tools in that run. The indicator
+animates even without new output; it does not measure remote progress. When a run
+returns, it leaves a `Completed`, `Stopped` (turn limit), or `Failed` time summary.
+Commands use the same live status line without adding a completion summary.
+
 `/help` lists commands. Bare groups (`/tools`, `/context`, `/model`) show
 help; `/tools list`, `/context info`, and `/model info` perform queries.
 `/tools enable <name>` and `/tools disable <name>` change tool availability.

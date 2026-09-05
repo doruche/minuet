@@ -126,9 +126,17 @@ authority to the frontend.
 ## TUI and terminal ownership
 
 `tui::app` owns pending user requests and coordinates input, progress and display.
-Its status label is only a projection of received events; the pending request
-controls input admission. Run progress is drained before displaying the returned
-outcome, and the outcome's tool summary is not replayed after live observation.
+Each pending request retains its monotonic submission time and a status label
+projected from received events. The label may lag execution; the pending request
+alone controls input admission. Each redraw borrows the label and samples elapsed
+time from that request's submission time. The renderer formats the duration and
+derives animation without a separate running flag or mutable clock. A local
+interval redraws only while a request is pending. Timing measures the TUI's wait
+until it observes the reply, not provider execution time, and never drives
+timeouts or cancellation. Completion summaries use that fixed duration and the
+returned run result, including failures and turn-limit stops. Run progress is
+drained before displaying the returned outcome, and the outcome's tool summary
+is not replayed after live observation.
 Command modules own their subcommand grammar, execution and result text; the
 root only assembles and dispatches command families. They share no session
 storage or tool registry and invoke the existing narrow kernel operations.

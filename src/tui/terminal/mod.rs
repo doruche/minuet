@@ -19,6 +19,7 @@ use crossterm::{
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
+    text::Text,
     widgets::{Paragraph, Widget},
 };
 
@@ -129,6 +130,20 @@ impl Screen {
         if !text.ends_with('\n') {
             self.fragment("\n", tone)?;
         }
+        Ok(())
+    }
+
+    /// Render a complete model answer as Markdown after its block structure is
+    /// known. Tool and status output deliberately continue through `line` so
+    /// incidental punctuation in diagnostics cannot become formatting.
+    pub fn markdown(&mut self, markdown: &str) -> io::Result<()> {
+        self.end_line()?;
+        let rendered = tui_markdown::from_str(markdown);
+        self.terminal.autoresize()?;
+        let lines = rendered.lines.len().max(1) as u16;
+        self.terminal.insert_before(lines, |buffer| {
+            Text::from(rendered.clone()).render(buffer.area, buffer);
+        })?;
         Ok(())
     }
 

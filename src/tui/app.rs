@@ -120,7 +120,7 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                 request = None;
                 status.clear();
                 match result {
-                    Ok(Reply::Run(outcome)) => screen.line(&render::outcome(&outcome), Tone::Text)?,
+                    Ok(Reply::Run(outcome)) => screen.markdown(&render::outcome(&outcome))?,
                     Ok(Reply::Command(text)) => screen.line(&text, Tone::Text)?,
                     Err(error) => screen.line(&format!("error: {error}"), Tone::Error)?,
                 }

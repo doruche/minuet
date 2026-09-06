@@ -9,8 +9,11 @@ that each module will become a crate.
 
 - `kernel` is the command sequencer and sole owner of runtime transitions.
   Consumers receive `KernelHandle`, never the store, registry, or their locks.
-- `session` owns the session repository, committed conversation items, session settings, usage, and derived summaries. Kernel owns the active session ID; each turn receives an immutable session and tool snapshot.
-  Snapshots are immutable and consumed during serialized kernel processing.
+- `session` owns the repository, provider context, semantic transcript, session
+  settings, usage, and derived summaries. Kernel owns the active session ID;
+  each turn receives immutable session and tool snapshots. Transcript reads are
+  immutable presentation snapshots. All snapshots are consumed during
+  serialized kernel processing.
 - `agent_loop` owns inference/tool sequencing policy through a narrow
   `LoopContext` capability.
 - `context` selects the model-visible view of committed history without a
@@ -45,11 +48,14 @@ enqueue transfers work to the kernel task; shutdown is an ordered barrier and
 optional bounded observer while `RunOutcome` remains the authority for result
 and completion.
 
-The memory session is the canonical conversation. The initial context sends
-the full committed history on every model turn. Provider continuation items
-remain opaque to the core, while adapters project only the fields needed by
-the loop.
+The memory session owns two histories with different contracts. Provider
+context is the canonical input for the next model turn and retains opaque
+continuation items. The semantic transcript is the canonical presentation
+history for user messages, model text, and grouped tool invocations. Repository
+commit operations update the matching facts together; neither history is
+derived from the other after commit.
 
 The TUI has one terminal input reader and restores terminal modes on normal,
-error, and interrupted exits. Progress is presentation data, not session
-history; terminal rendering does not own execution cancellation.
+error, and interrupted exits. Live progress is presentation data, not session
+history. The TUI consumes immutable transcript views for replay and owns
+neither history mutation nor execution cancellation.

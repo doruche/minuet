@@ -7,9 +7,13 @@ the source for ownership and dependency rationale.
 
 ## Session lifetime
 
-Sessions exist only in process memory. Each process starts with a fresh UUID session; session list/switch/clear/delete are available in the TUI, while terminal scrollback is not replayed on creation or switching. Restarting Minuet loses conversation
-history, session settings, and usage summaries. There is no persistence,
-session export, or cross-process session sharing.
+Sessions exist only in process memory. Each process starts with a fresh UUID
+session; session list/switch/clear/delete are available in the TUI. Creating or
+clearing a session replaces the current display with an empty view. Switching
+replaces it with the selected session's user messages, model messages, and
+grouped tool invocation records. Restarting Minuet loses conversation history,
+session settings, and usage summaries. There is no persistence, session export,
+or cross-process session sharing.
 
 The configuration file is read when the process starts. Session settings and
 tool toggles changed during an interactive run are not written back to disk.
@@ -64,10 +68,11 @@ there is no cancel-current-run action or second-key force-abort shortcut.
 
 ## Terminal interface
 
-The interactive interface uses the terminal's main screen and scrollback. It has
-basic multiline editing but no input history, completion, selection menus,
-application-owned transcript browser or input queue during execution. TUI mode
-requires terminal stdin and stdout; there is no plain-text REPL fallback.
+The interactive interface uses the terminal's main screen and scrollback. It
+has basic multiline editing and session replay, but no input history,
+completion, selection menus, full-screen transcript browser, transcript
+pagination, or input queue during execution. TUI mode requires terminal stdin
+and stdout; there is no plain-text REPL fallback.
 
 Tool progress is UTF-8 text, not a terminal emulation protocol. Newlines are
 preserved, tabs are displayed as spaces, and other control characters (including

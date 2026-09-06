@@ -47,7 +47,9 @@ model responses and tool rounds.
 
 The scope excludes durable storage, import/export, cross-process resume or
 sharing, session names, automatic titles, branching, undo, a recycle bin,
-tombstones, prune/GC commands, and transcript-browser or terminal-replay work.
+tombstones, prune/GC commands, and a full-screen transcript browser. Semantic
+session transcript storage and TUI replay are defined by the later
+`session-transcript.md` ECP.
 There is no compatibility requirement for the old session commands or integer
 IDs. No dormant persistence implementation or serialization framework is needed.
 
@@ -226,18 +228,19 @@ Use one formal TUI command family:
 `info` and `clear` apply to the active session. List identifies the active row,
 and creation/switch replies identify the resulting active session. Parse full
 UUIDs at the command boundary; malformed IDs and absent targets fail visibly.
-Remove `/new` and `/clear` without aliases. No name resolution or ID-prefix
-matching is required. Existing model-effort and tool commands operate on the
-active session policy through kernel commands.
+Remove the old bare `/new` command. `/clear` is retained as a top-level
+convenience command with the same mutation and redraw semantics as
+`/session clear`; no name resolution or ID-prefix matching is required.
+Existing model-effort and tool commands operate on the active session policy
+through kernel commands.
 
-Switching changes the target of subsequent work; it does not rewrite terminal
-scrollback or replay old progress. Creating a session has the same behavior: it
-does not clear the terminal or replay any history. The terminal is a continuous
-work log rather than a complete view of the active session. Command replies must
-identify the resulting active ID, and list output must mark it, so users can
-verify the target despite the absence of replay. One-shot `chat` retains its
-fresh-session, single-turn behavior without new resume or session-selection
-options.
+Switching changes the target of subsequent work and replaces the TUI view with
+the target's semantic transcript. Creating or clearing a session replaces the
+view with an empty session. Replay does not re-run progress, inference, or
+tools; it renders stored user, model, and grouped tool-invocation semantics.
+Command replies identify the resulting active ID, and list output marks it.
+One-shot `chat` retains its fresh-session, single-turn behavior without new
+resume or session-selection options.
 
 ## Acceptance evidence
 
@@ -298,8 +301,8 @@ closing this ECP. Until then, existing effective contracts remain unchanged.
 
 ## Implementation and cutover record
 
-Implementation commits: `bd3939e`, `c1dcd74`, `16280e1`, `5cfd879`, `1bb0b9b`, `7d7aef6`, and `e8aab8e`, followed by the final tool ownership correction. The implementation introduces UUID session IDs, repository lifecycle operations, session summaries, kernel create/list/info/switch/clear/delete commands, formal `/session` TUI commands, and turn-scoped tool snapshots. Tool selection is session-owned and registry implementations are process-level capabilities. Model/provider, loop, and context strategy remain startup-fixed.
+Implementation commits: `bd3939e`, `c1dcd74`, `16280e1`, `5cfd879`, `1bb0b9b`, `7d7aef6`, and `e8aab8e`, followed by the transcript implementation and final tool ownership correction. The implementation introduces UUID session IDs, repository lifecycle operations, session summaries, kernel create/list/info/switch/clear/delete commands, formal `/session` TUI commands, turn-scoped tool snapshots, and the session-owned semantic transcript. Tool selection is session-owned and registry implementations are process-level capabilities. Model/provider, loop, and context strategy remain startup-fixed.
 
-Validation on 2026-09-06: `nix develop -c cargo fmt --all`, `nix develop -c cargo check`, `nix develop -c cargo clippy --locked --all-targets --all-features -- -D warnings`, and `nix develop -c cargo test --all-targets` passed. The live MiniMax test remains ignored because it requires credentials. The effective lifecycle contract is now recorded in `docs/contracts/session/lifecycle.md`.
+Validation on 2026-09-06: `nix develop -c cargo fmt --all`, `nix develop -c cargo check`, `nix develop -c cargo clippy --locked --all-targets --all-features -- -D warnings`, and `nix develop -c cargo test --locked --all-targets --all-features` passed. The live MiniMax test remains ignored because it requires credentials. The effective lifecycle contract is recorded in `docs/contracts/session/lifecycle.md`; transcript ownership and replay are recorded in `docs/ecps/session-transcript.md`.
 
-The implementation does not provide durable storage, session names, provider-side conversation state, dynamic model/loop/context switching, logical deletion, GC, or transcript replay. These remain explicit future decisions.
+The implementation does not provide durable storage, session names, provider-side conversation state, dynamic model/loop/context switching, logical deletion, GC, pagination, or a full-screen transcript browser. These remain explicit future decisions.

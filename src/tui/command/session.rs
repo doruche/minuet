@@ -18,16 +18,35 @@ impl Command {
         match self {
             Self::New => Ok(format!("started session {}", kernel.new_session().await?)),
             Self::List => {
+                let active = kernel.active_session().await?;
                 let rows = kernel.list_sessions().await?;
                 Ok(rows
                     .into_iter()
-                    .map(|s| format!("{} {}", s.id, s.brief))
+                    .map(|s| {
+                        format!(
+                            "{} {} {}",
+                            if s.id == active { "*" } else { " " },
+                            s.id,
+                            s.brief
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"))
             },
             Self::Info => {
                 let id = kernel.active_session().await?;
-                Ok(format!("active session {id}"))
+                let row = kernel
+                    .list_sessions()
+                    .await?
+                    .into_iter()
+                    .find(|s| s.id == id)
+                    .ok_or(KernelError::Session(
+                        minuet::session::SessionStoreError::NotFound(id),
+                    ))?;
+                Ok(format!(
+                    "session {}: {} items, effort={:?}, usage_total={}",
+                    id, row.item_count, row.config.reasoning_effort, row.usage.total_tokens
+                ))
             },
             Self::Switch { id } => {
                 let id = SessionId::parse(&id).map_err(KernelError::SessionId)?;

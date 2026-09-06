@@ -42,7 +42,7 @@ pub fn start(
 ) -> Result<RunningKernel, KernelError> {
     let active_session = components.store.create(SessionConfig {
         reasoning_effort: options.default_reasoning_effort.clone(),
-        enabled_tools: Vec::new(),
+        enabled_tools: options.default_enabled_tools.clone(),
     })?;
     let (sender, receiver) = mpsc::channel(COMMAND_BUFFER);
     let task = KernelTask {
@@ -230,7 +230,8 @@ impl KernelTask {
 
     async fn context_info(&mut self) -> Result<ContextInfo, KernelError> {
         let snapshot = self.store.snapshot(self.active_session)?;
-        let definitions = self.tools.definitions();
+        let tool_snapshot = self.tools.snapshot(&snapshot.config.enabled_tools)?;
+        let definitions = tool_snapshot.definitions();
         let prepared_input = self.context.prepare(&snapshot.items);
         let request = InferenceRequest {
             model: self.model.model.as_str(),
@@ -386,7 +387,7 @@ mod tests {
                 model: ModelName::new("test-model").unwrap(),
             },
             default_reasoning_effort: None,
-            default_enabled_tools: Vec::new(),
+            default_enabled_tools: vec!["echo".to_owned()],
         }
     }
 
@@ -682,7 +683,11 @@ mod tests {
                 agent_loop: Arc::new(ReactLoop::new(4).unwrap()),
                 context: Arc::new(FullContext),
             },
-            options(),
+            {
+                let mut opts = options();
+                opts.default_enabled_tools = vec!["stream".into()];
+                opts
+            },
         )
         .unwrap();
         (running, backend, release)

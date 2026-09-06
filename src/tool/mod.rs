@@ -117,14 +117,7 @@ impl ToolRegistry {
 
     pub fn snapshot(&self, enabled: &[String]) -> Result<ToolSnapshot, ToolRegistryError> {
         let mut tools = BTreeMap::new();
-        let names = if enabled.is_empty() {
-            self.tools
-                .iter()
-                .filter_map(|(name, tool)| tool.enabled.then_some(name.clone()))
-                .collect::<Vec<_>>()
-        } else {
-            enabled.to_vec()
-        };
+        let names = enabled.to_vec();
         for name in &names {
             let registered = self
                 .tools

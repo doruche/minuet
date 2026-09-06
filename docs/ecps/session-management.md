@@ -1,6 +1,6 @@
 # Session management and session-owned policy
 
-Status: agreed design; implementation and cutover pending.
+Status: closed; cutover complete.
 
 Decision date: 2026-09-06.
 
@@ -294,3 +294,12 @@ and command documentation, and add the small effective session contract under
 type layout and implementation mechanics in code. Record implementation
 revisions, acceptance results, scope limits, and cutover outcome here before
 closing this ECP. Until then, existing effective contracts remain unchanged.
+
+
+## Implementation and cutover record
+
+Implementation commits: `bd3939e`, `c1dcd74`, `16280e1`, `5cfd879`, `1bb0b9b`, `7d7aef6`, and `e8aab8e`, followed by the final tool ownership correction. The implementation introduces UUID session IDs, repository lifecycle operations, session summaries, kernel create/list/info/switch/clear/delete commands, formal `/session` TUI commands, and turn-scoped tool snapshots. Tool selection is session-owned and registry implementations are process-level capabilities. Model/provider, loop, and context strategy remain startup-fixed.
+
+Validation on 2026-09-06: `nix develop -c cargo fmt --all`, `nix develop -c cargo check`, `nix develop -c cargo clippy --locked --all-targets --all-features -- -D warnings`, and `nix develop -c cargo test --all-targets` passed. The live MiniMax test remains ignored because it requires credentials. The effective lifecycle contract is now recorded in `docs/contracts/session/lifecycle.md`.
+
+The implementation does not provide durable storage, session names, provider-side conversation state, dynamic model/loop/context switching, logical deletion, GC, or transcript replay. These remain explicit future decisions.

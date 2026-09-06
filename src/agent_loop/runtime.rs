@@ -79,7 +79,7 @@ impl<'a> LoopContext<'a> {
             session_id,
             model,
             input,
-            reasoning_effort: snapshot.reasoning_effort,
+            reasoning_effort: snapshot.config.reasoning_effort,
             definitions,
         })
     }

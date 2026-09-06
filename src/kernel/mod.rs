@@ -8,7 +8,7 @@ use crate::{
     context::ContextStrategy,
     inference::{InferenceBackend, InferenceRequest},
     model::{IdentifierError, ModelSelection, ReasoningEffort},
-    session::{SessionId, SessionStore, SessionStoreError, UsageSummary},
+    session::{SessionConfig, SessionId, SessionStore, SessionStoreError, UsageSummary},
     tool::{ToolRegistry, ToolRegistryError},
 };
 
@@ -39,9 +39,10 @@ pub fn start(
     mut components: KernelComponents,
     options: KernelOptions,
 ) -> Result<RunningKernel, KernelError> {
-    let active_session = components
-        .store
-        .create(options.default_reasoning_effort.clone())?;
+    let active_session = components.store.create(SessionConfig {
+        reasoning_effort: options.default_reasoning_effort.clone(),
+        enabled_tools: Vec::new(),
+    })?;
     let (sender, receiver) = mpsc::channel(COMMAND_BUFFER);
     let task = KernelTask {
         backend: components.backend,
@@ -121,10 +122,7 @@ impl KernelTask {
                     payload: effort,
                     reply,
                 }) => {
-                    let result = self
-                        .store
-                        .set_reasoning_effort(self.active_session, effort)
-                        .map_err(Into::into);
+                    let result = self.set_reasoning_effort(effort);
                     let _ = reply.send(result);
                 },
                 Command::ListTools(Envelope { reply, .. }) => {
@@ -154,8 +152,19 @@ impl KernelTask {
         }
     }
 
+    fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) -> Result<(), KernelError> {
+        let mut config = self.store.snapshot(self.active_session)?.config;
+        config.reasoning_effort = effort;
+        self.store
+            .set_config(self.active_session, config)
+            .map_err(Into::into)
+    }
+
     fn new_session(&mut self) -> Result<SessionId, KernelError> {
-        let id = self.store.create(self.default_reasoning_effort.clone())?;
+        let id = self.store.create(SessionConfig {
+            reasoning_effort: self.default_reasoning_effort.clone(),
+            enabled_tools: Vec::new(),
+        })?;
         self.active_session = id;
         Ok(id)
     }
@@ -169,7 +178,10 @@ impl KernelTask {
         Ok(ModelInfo {
             provider: self.model.provider.to_string(),
             model: self.model.model.to_string(),
-            reasoning_effort: snapshot.reasoning_effort.map(|effort| effort.to_string()),
+            reasoning_effort: snapshot
+                .config
+                .reasoning_effort
+                .map(|effort| effort.to_string()),
         })
     }
 
@@ -181,7 +193,7 @@ impl KernelTask {
             model: self.model.model.as_str(),
             input: &prepared_input,
             tools: &definitions,
-            reasoning_effort: snapshot.reasoning_effort.as_ref(),
+            reasoning_effort: snapshot.config.reasoning_effort.as_ref(),
             observer: None,
         };
         let input_tokens = match self.backend.count_input_tokens(request).await {

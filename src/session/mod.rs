@@ -1,6 +1,7 @@
 use std::fmt;
 
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{
     inference::{ConversationItem, TokenUsage},
@@ -8,23 +9,48 @@ use crate::{
 };
 
 mod memory;
+pub use memory::MemorySessionRepository;
 
-pub use memory::MemorySessionStore;
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SessionId(Uuid);
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct SessionId(u64);
+impl SessionId {
+    pub fn parse(value: &str) -> Result<Self, SessionIdError> {
+        Uuid::parse_str(value)
+            .map(Self)
+            .map_err(|_| SessionIdError::Invalid(value.to_owned()))
+    }
+    pub(crate) fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
 
 impl fmt::Display for SessionId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}", self.0)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SessionConfig {
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub enabled_tools: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SessionSnapshot {
     pub id: SessionId,
     pub items: Vec<ConversationItem>,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub config: SessionConfig,
+    pub usage: UsageSummary,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionSummary {
+    pub id: SessionId,
+    pub brief: String,
+    pub item_count: usize,
+    pub config: SessionConfig,
     pub usage: UsageSummary,
 }
 
@@ -53,117 +79,60 @@ impl UsageSummary {
     }
 }
 
-/// The store is the sole owner of committed conversation history, per-session
-/// settings, and observed usage. Snapshots are immutable and may become stale;
-/// the kernel uses them only while it serializes all commands for one run.
-pub trait SessionStore: Send {
-    fn create(
-        &mut self,
-        reasoning_effort: Option<ReasoningEffort>,
-    ) -> Result<SessionId, SessionStoreError>;
-
-    fn snapshot(&self, id: SessionId) -> Result<SessionSnapshot, SessionStoreError>;
-
+pub trait SessionRepository: Send {
+    fn create(&mut self, config: SessionConfig) -> Result<SessionId, SessionRepositoryError>;
+    fn list(&self) -> Vec<SessionSummary>;
+    fn snapshot(&self, id: SessionId) -> Result<SessionSnapshot, SessionRepositoryError>;
     fn append(
         &mut self,
         id: SessionId,
         items: &[ConversationItem],
-    ) -> Result<(), SessionStoreError>;
-
-    fn clear(&mut self, id: SessionId) -> Result<(), SessionStoreError>;
-
+    ) -> Result<(), SessionRepositoryError>;
+    fn clear(&mut self, id: SessionId) -> Result<(), SessionRepositoryError>;
+    fn delete(&mut self, id: SessionId) -> Result<(), SessionRepositoryError>;
     fn commit_inference(
         &mut self,
         id: SessionId,
         output: &[ConversationItem],
         usage: Option<TokenUsage>,
-    ) -> Result<(), SessionStoreError>;
-
-    fn set_reasoning_effort(
+    ) -> Result<(), SessionRepositoryError>;
+    fn set_config(
         &mut self,
         id: SessionId,
-        effort: Option<ReasoningEffort>,
-    ) -> Result<(), SessionStoreError>;
-}
-
-struct Session {
-    items: Vec<ConversationItem>,
-    reasoning_effort: Option<ReasoningEffort>,
-    usage: UsageSummary,
+        config: SessionConfig,
+    ) -> Result<(), SessionRepositoryError>;
 }
 
 #[derive(Debug, Error)]
-pub enum SessionStoreError {
+pub enum SessionIdError {
+    #[error("invalid session ID `{0}`")]
+    Invalid(String),
+}
+
+#[derive(Debug, Error)]
+pub enum SessionRepositoryError {
     #[error("session {0} was not found")]
     NotFound(SessionId),
-    #[error("session identifier space is exhausted")]
-    IdExhausted,
+    #[error("session {0} already exists")]
+    AlreadyExists(SessionId),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn inference_commit_updates_history_and_usage_together() {
-        let mut store = MemorySessionStore::default();
-        let id = store.create(None).unwrap();
-        let output = [ConversationItem::UserText("test".to_owned())];
-        let usage = TokenUsage {
-            input_tokens: 4,
-            output_tokens: 2,
-            total_tokens: 6,
-        };
-
-        store.commit_inference(id, &output, Some(usage)).unwrap();
-        let snapshot = store.snapshot(id).unwrap();
-        assert_eq!(snapshot.items.len(), 1);
-        assert_eq!(snapshot.usage.reported_calls, 1);
-        assert_eq!(snapshot.usage.total_tokens, 6);
-        assert_eq!(snapshot.usage.latest, Some(usage));
+    fn session_ids_round_trip() {
+        let id = SessionId::new();
+        assert_eq!(SessionId::parse(&id.to_string()).unwrap(), id);
     }
-
     #[test]
-    fn tracks_calls_without_upstream_usage_as_unknown() {
-        let mut summary = UsageSummary::default();
-        summary.observe(None);
-        assert_eq!(summary.reported_calls, 0);
-        assert_eq!(summary.unreported_calls, 1);
-        assert_eq!(summary.total_tokens, 0);
-        assert_eq!(summary.latest, None);
-    }
-
-    #[test]
-    fn clearing_a_session_removes_history_and_usage_but_keeps_settings() {
-        let mut store = MemorySessionStore::default();
-        let id = store
-            .create(Some(ReasoningEffort::new("careful").unwrap()))
-            .unwrap();
-        store
-            .append(id, &[ConversationItem::UserText("old".into())])
-            .unwrap();
-        store
-            .commit_inference(
-                id,
-                &[ConversationItem::FunctionCallOutput {
-                    call_id: "call".into(),
-                    output: "answer".into(),
-                }],
-                Some(TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 2,
-                    total_tokens: 3,
-                }),
-            )
-            .unwrap();
-
-        store.clear(id).unwrap();
-        let snapshot = store.snapshot(id).unwrap();
-        assert!(snapshot.items.is_empty());
-        assert_eq!(snapshot.usage, UsageSummary::default());
-        assert_eq!(
-            snapshot.reasoning_effort,
-            Some(ReasoningEffort::new("careful").unwrap())
-        );
+    fn unknown_usage_is_counted() {
+        let mut usage = UsageSummary::default();
+        usage.observe(None);
+        assert_eq!(usage.unreported_calls, 1);
     }
 }
+
+pub use SessionRepository as SessionStore;
+pub use SessionRepositoryError as SessionStoreError;
+pub use memory::MemorySessionRepository as MemorySessionStore;

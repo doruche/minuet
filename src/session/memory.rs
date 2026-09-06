@@ -1,95 +1,115 @@
+use super::{
+    ConversationItem, SessionConfig, SessionId, SessionRepository, SessionRepositoryError,
+    SessionSnapshot, SessionSummary, TokenUsage, UsageSummary,
+};
 use std::collections::BTreeMap;
 
-use super::{
-    ConversationItem, ReasoningEffort, Session, SessionId, SessionSnapshot, SessionStore,
-    SessionStoreError, TokenUsage,
-};
-
 #[derive(Default)]
-pub struct MemorySessionStore {
-    next_id: u64,
-    sessions: BTreeMap<SessionId, Session>,
+pub struct MemorySessionRepository {
+    sessions: BTreeMap<SessionId, Record>,
 }
-
-impl SessionStore for MemorySessionStore {
-    fn create(
-        &mut self,
-        reasoning_effort: Option<ReasoningEffort>,
-    ) -> Result<SessionId, SessionStoreError> {
-        let id = SessionId(self.next_id);
-        self.next_id = self
-            .next_id
-            .checked_add(1)
-            .ok_or(SessionStoreError::IdExhausted)?;
+struct Record {
+    items: Vec<ConversationItem>,
+    config: SessionConfig,
+    usage: UsageSummary,
+}
+impl SessionRepository for MemorySessionRepository {
+    fn create(&mut self, config: SessionConfig) -> Result<SessionId, SessionRepositoryError> {
+        let id = loop {
+            let id = SessionId::new();
+            if !self.sessions.contains_key(&id) {
+                break id;
+            }
+        };
         self.sessions.insert(
             id,
-            Session {
-                items: Vec::new(),
-                reasoning_effort,
-                usage: super::UsageSummary::default(),
+            Record {
+                items: vec![],
+                config,
+                usage: UsageSummary::default(),
             },
         );
         Ok(id)
     }
-
-    fn snapshot(&self, id: SessionId) -> Result<SessionSnapshot, SessionStoreError> {
-        let session = self.session(id)?;
+    fn list(&self) -> Vec<SessionSummary> {
+        self.sessions
+            .iter()
+            .map(|(id, s)| SessionSummary {
+                id: *id,
+                brief: brief(&s.items),
+                item_count: s.items.len(),
+                config: s.config.clone(),
+                usage: s.usage.clone(),
+            })
+            .collect()
+    }
+    fn snapshot(&self, id: SessionId) -> Result<SessionSnapshot, SessionRepositoryError> {
+        let s = self.get(id)?;
         Ok(SessionSnapshot {
             id,
-            items: session.items.clone(),
-            reasoning_effort: session.reasoning_effort.clone(),
-            usage: session.usage.clone(),
+            items: s.items.clone(),
+            config: s.config.clone(),
+            usage: s.usage.clone(),
         })
     }
-
     fn append(
         &mut self,
         id: SessionId,
-        items: &[ConversationItem],
-    ) -> Result<(), SessionStoreError> {
-        self.session_mut(id)?.items.extend_from_slice(items);
+        x: &[ConversationItem],
+    ) -> Result<(), SessionRepositoryError> {
+        self.get_mut(id)?.items.extend_from_slice(x);
         Ok(())
     }
-
-    fn clear(&mut self, id: SessionId) -> Result<(), SessionStoreError> {
-        let session = self.session_mut(id)?;
-        session.items.clear();
-        session.usage = super::UsageSummary::default();
+    fn clear(&mut self, id: SessionId) -> Result<(), SessionRepositoryError> {
+        let s = self.get_mut(id)?;
+        s.items.clear();
+        s.usage = UsageSummary::default();
         Ok(())
     }
-
+    fn delete(&mut self, id: SessionId) -> Result<(), SessionRepositoryError> {
+        self.sessions
+            .remove(&id)
+            .map(|_| ())
+            .ok_or(SessionRepositoryError::NotFound(id))
+    }
     fn commit_inference(
         &mut self,
         id: SessionId,
-        output: &[ConversationItem],
-        usage: Option<TokenUsage>,
-    ) -> Result<(), SessionStoreError> {
-        let session = self.session_mut(id)?;
-        session.items.extend_from_slice(output);
-        session.usage.observe(usage);
+        x: &[ConversationItem],
+        u: Option<TokenUsage>,
+    ) -> Result<(), SessionRepositoryError> {
+        let s = self.get_mut(id)?;
+        s.items.extend_from_slice(x);
+        s.usage.observe(u);
         Ok(())
     }
-
-    fn set_reasoning_effort(
+    fn set_config(
         &mut self,
         id: SessionId,
-        effort: Option<ReasoningEffort>,
-    ) -> Result<(), SessionStoreError> {
-        self.session_mut(id)?.reasoning_effort = effort;
+        c: SessionConfig,
+    ) -> Result<(), SessionRepositoryError> {
+        self.get_mut(id)?.config = c;
         Ok(())
     }
 }
-
-impl MemorySessionStore {
-    fn session(&self, id: SessionId) -> Result<&Session, SessionStoreError> {
+impl MemorySessionRepository {
+    fn get(&self, id: SessionId) -> Result<&Record, SessionRepositoryError> {
         self.sessions
             .get(&id)
-            .ok_or(SessionStoreError::NotFound(id))
+            .ok_or(SessionRepositoryError::NotFound(id))
     }
-
-    fn session_mut(&mut self, id: SessionId) -> Result<&mut Session, SessionStoreError> {
+    fn get_mut(&mut self, id: SessionId) -> Result<&mut Record, SessionRepositoryError> {
         self.sessions
             .get_mut(&id)
-            .ok_or(SessionStoreError::NotFound(id))
+            .ok_or(SessionRepositoryError::NotFound(id))
     }
+}
+fn brief(items: &[ConversationItem]) -> String {
+    items
+        .iter()
+        .find_map(|i| match i {
+            ConversationItem::UserText(t) => Some(t.chars().take(80).collect()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "empty session".into())
 }

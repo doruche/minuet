@@ -155,7 +155,10 @@ mod tests {
             parse("/context info"),
             Input::Command(Command::Context(context::Command::Info))
         );
-        assert_eq!(parse("/clear"), Input::Command(Command::Clear));
+        assert_eq!(
+            parse("/session clear"),
+            Input::Command(Command::Session(session::Command::Clear))
+        );
         assert_eq!(
             parse("/model info"),
             Input::Command(Command::Model(model::Command::Info))

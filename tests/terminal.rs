@@ -166,6 +166,7 @@ async fn terminal_fixture() {
                 model: ModelName::new("fixture").unwrap(),
             },
             default_reasoning_effort: None,
+            default_enabled_tools: Vec::new(),
         },
     )
     .unwrap();

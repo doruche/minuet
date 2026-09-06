@@ -33,6 +33,7 @@ async fn responses_tool_loop_and_input_count() {
                 model: ModelName::new(model).unwrap(),
             },
             default_reasoning_effort: Some(ReasoningEffort::new("low").unwrap()),
+            default_enabled_tools: vec!["echo".to_owned()],
         },
     )
     .unwrap();

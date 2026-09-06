@@ -82,6 +82,12 @@ in a replaceable preview while it is generated and published as complete
 Markdown only after the model turn commits. Failed partial output remains
 visible as an incomplete draft and is not committed.
 
+Committed model messages and tool-call requests appear in model-output order
+before tools execute. Tool returns are shown immediately; context outputs and
+stored invocation results commit together at the end of the round. Replay
+groups final results under their requests and does not reproduce execution
+timing. A pending record means no committed result, not proof of no execution.
+
 Model previews reveal grapheme clusters in small batches, accelerating for
 larger bursts. Up to six recent wrapped rows remain visible, subject to terminal
 height. Commit replaces the preview immediately with authoritative Markdown;
@@ -90,9 +96,12 @@ Presentation pacing never delays event reception, tool execution, or shutdown,
 and does not continue playing an animation after completion. Short responses
 may complete before a preview frame is drawn. There is no pacing configuration.
 
-The TUI parses each completed model answer as one Markdown document so reference
-links can resolve across paragraphs, then formats and publishes one top-level
-block at a time. It does not incrementally parse model tokens as final Markdown;
+The TUI parses each complete model message as one Markdown document in both
+live display and replay, then publishes one top-level block at a time. References
+resolve within that message, not across separate messages in a response. An
+unclosed fence does not capture the next message or a tool notice. Model-authored
+syntax is rendered as received without repair. It does not incrementally parse
+model tokens as final Markdown;
 the in-progress preview is replaceable and intentionally provisional. The supported
 dialect is CommonMark with tables, task lists and strikethrough; raw HTML stays
 literal and images are text placeholders. Recognized code languages use bundled
@@ -115,7 +124,9 @@ all UTF-8 stdin until EOF as one prompt, without a size limit. Empty prompts are
 rejected. The former implicit line-by-line pipe conversation has been removed.
 
 Only final text is printed to stdout, without terminal escaping; a missing final
-newline is added. Step-limit text may be partial and is accompanied by a nonzero
+newline is added. Multiple messages in the final model turn are concatenated
+in order for this summary; it does not preserve TUI document boundaries.
+Step-limit text may be partial and is accompanied by a nonzero
 exit and stderr diagnostic. Agent completion does not promise that every tool
 succeeded: tool errors can be model-visible results from which the agent recovers.
 SIGINT during execution requests shutdown and returns 130 after accepted work

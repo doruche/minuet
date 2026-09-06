@@ -233,7 +233,60 @@ mod tests {
             json!({"type":"response.completed","response":{"status":"completed","output":[]}}),
         ])
         .unwrap();
-        assert!(matches!(r.output[0].effect(), crate::inference::OutputEffect::Text(t) if t=="OK"));
+        assert!(
+            matches!(r.output[0].effect(), crate::inference::OutputEffect::Message(t) if t=="OK")
+        );
+    }
+
+    #[test]
+    fn complete_and_reconstructed_turns_preserve_message_boundaries_and_call_order() {
+        use crate::inference::OutputEffect;
+        let items = vec![
+            json!({"type":"reasoning","encrypted_content":"opaque"}),
+            message("[cross][ref]\n\n"),
+            message("[ref]: https://example.test\n\nseparate"),
+            json!({"type":"function_call","call_id":"x","name":"echo","arguments":"{}"}),
+            message("```rust\nfn partial() {}"),
+            json!({"type":"function_call","call_id":"y","name":"echo","arguments":"{}"}),
+            message("**after-fence**"),
+        ];
+        for reconstruct in [false, true] {
+            let mut events = Vec::new();
+            if reconstruct {
+                // Completion arrival order must not replace output_index order.
+                for (index, item) in items.iter().enumerate().rev() {
+                    events.push(json!({"type":"response.output_item.done","output_index":index,"item":item}));
+                }
+            }
+            events.push(json!({"type":"response.completed","response":{"status":"completed","output":if reconstruct { vec![] } else { items.clone() }}}));
+            let response = stream(events).unwrap();
+            assert_eq!(response.output.len(), items.len());
+            for (projected, original) in response.output.iter().zip(&items) {
+                assert_eq!(
+                    projected.clone().into_continuation().protocol_value(),
+                    original
+                );
+            }
+            assert!(matches!(response.output[0].effect(), OutputEffect::None));
+            assert!(
+                matches!(response.output[1].effect(), OutputEffect::Message(text) if text == "[cross][ref]\n\n")
+            );
+            assert!(
+                matches!(response.output[2].effect(), OutputEffect::Message(text) if text.starts_with("[ref]:"))
+            );
+            assert!(
+                matches!(response.output[3].effect(), OutputEffect::ToolCall(call) if call.call_id == "x")
+            );
+            assert!(
+                matches!(response.output[4].effect(), OutputEffect::Message(text) if text.starts_with("```"))
+            );
+            assert!(
+                matches!(response.output[5].effect(), OutputEffect::ToolCall(call) if call.call_id == "y")
+            );
+            assert!(
+                matches!(response.output[6].effect(), OutputEffect::Message(text) if text == "**after-fence**")
+            );
+        }
     }
     #[test]
     fn terminal_item_is_authoritative() {
@@ -246,7 +299,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(result.output[0].effect(), crate::inference::OutputEffect::Text(t) if t == "NO")
+            matches!(result.output[0].effect(), crate::inference::OutputEffect::Message(t) if t == "NO")
         );
     }
 
@@ -258,7 +311,7 @@ mod tests {
             json!({"type":"response.completed","response":{"status":"completed","output":[item]}}),
         ]).unwrap();
         assert!(
-            matches!(result.output[0].effect(), crate::inference::OutputEffect::Text(t) if t == "OK")
+            matches!(result.output[0].effect(), crate::inference::OutputEffect::Message(t) if t == "OK")
         );
     }
     #[test]

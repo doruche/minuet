@@ -1,14 +1,15 @@
 # Ordered model output and session commit handoff
 
-Status: accepted; implementation in progress, no cutover recorded.
+Status: closed; implementation and validated cutover complete.
 
 Proposal date: 2026-09-07.
 
 Authorization: the project owner authorized implementation, appropriate commits,
 and one independent subagent reviewer on 2026-09-07. Local design and file
 boundaries may adapt to evidence within the target. A scope expansion or a
-distorted target requires a renewed decision and ECP amendment. This document
-does not record a completed cutover or authorize unrelated work.
+distorted target requires a renewed decision and ECP amendment. The cutover
+record below establishes the completed scope; unrelated work remains outside
+this authorization.
 
 ## Baseline and evidence
 
@@ -270,3 +271,69 @@ New persistence/recovery, concurrent execution or session mutation, per-tool
 commit, cancellation, or a mandatory full-screen renderer also require a new
 scope decision. Passing tests for single-message happy paths cannot substitute
 for the ordered-output and failure evidence above.
+
+## Cutover record
+
+Cutover date: 2026-09-07.
+
+The implementation retains the existing source-directory owners. No execution
+registry, storage facade, full-screen renderer, compatibility bridge, or
+incremental input cache was needed. `Screen::publish_entries` is the common
+live/replay publication operation. The current whole-round execution protocol
+allows tool-result display deduplication without a frontend state registry:
+executed results arrive first as observations, while skipped results are shown
+only on committed publication. This ordering obligation is now explicit in
+[the loop contract](../contracts/agent-loop/execution.md).
+
+Repository `ensure_ready` checks uncommitted results. Runtime's optional request
+list represents only the unconsumed execution opportunity, and is taken before
+invocation or skipping. It cannot be restored on failure. Kernel checks both
+obligations through runtime completion; a failing policy return retains its
+original error alongside any outstanding-round violation. The context snapshot
+is refreshed from repository history for every inference, including selective
+context strategies. No scope amendment or target reduction was necessary.
+
+Actual Rust API changes:
+
+- `OutputEffect::Text` becomes `OutputEffect::Message`, denoting a complete
+  message rather than a stream fragment.
+- `SessionRepository` adds `ensure_ready`; `commit_inference` returns
+  `ModelCommit` with ordered entries and confirmed calls; `commit_tool_round`
+  returns committed invocation snapshots and rejects absent rounds.
+- `PendingToolRound`, `invoke_and_commit`, and `skip_and_commit` are removed.
+  Policy uses `has_pending_tools`, `invoke_pending`, and `skip_pending` on the
+  current context. `CommittedModelTurn` exposes ordered entries and an explicit
+  lossy `text_summary()` instead of an executable round and flattened text.
+- `ModelTurnCommitted` carries ordered entries. `ToolFinished` becomes
+  `ToolExecutionFinished`; `ToolRoundCommitted` publishes confirmed results.
+  Loop errors explicitly represent invalid operations and unfinished returns.
+- `RunOutcome.text`, CLI output/exit behavior, provider wire formats, session
+  commands, and kernel handle submission/shutdown semantics remain supported.
+
+Acceptance evidence was checked against implementation and tests:
+
+| Requirement | Evidence |
+| --- | --- |
+| Ordered adapter output and opaque continuation | `complete_and_reconstructed_turns_preserve_message_boundaries_and_call_order`, including out-of-order finalized-item arrivals. |
+| Live/replay message boundaries, order, and one-time publication | `pty_live_and_replay_preserve_interleaving_and_independent_markdown_documents`; `pty_unclosed_model_code_cannot_capture_the_run_limit_notice`. |
+| Atomic matching commits and immutable reads | Repository `semantic_order_and_results_share_reads_without_copying_payloads`, `invalid_rounds_cannot_partially_change_either_history`, and clear/skip lifecycle tests. |
+| Execution observations versus commitment | Runtime `ordered_commit_and_execution_observations_have_distinct_handoffs`, with X observable while Y is gated; commit rejection tests cover both invocation and skipping. |
+| Single-use execution and completion validation | Runtime round-operation, unfinished-run, and dropped-operation tests; kernel `kernel_rejects_policy_completion_with_unresolved_calls`. |
+| Fresh provider input across rounds and runs | `every_inference_reads_repository_context_across_rounds_and_runs`, under full and selective context strategies, with success, failure, skip, repeated tool names and reused call IDs. Later inference failure preserves history and usage. |
+| Protected frontend and lifecycle behavior | Full kernel, CLI, and PTY suites, including replay without execution, failed tools, new/switch/clear, detachment, shutdown and terminal restoration. |
+
+Validation passed in the Nix development environment:
+
+- `cargo fmt --all -- --check`
+- `cargo check --locked --all-targets --all-features`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- `cargo test --locked --all-targets --all-features`: 143 passed, 1 ignored.
+- `git diff --check`
+
+The ignored live MiniMax integration test was not run; this cutover claims
+fixture-backed preservation of existing provider behavior, not new live-provider
+compatibility. One independent subagent reviewed the actual code, tests, and
+updated contracts using the owner-centered review criteria. Both that review
+and the primary closeout found no remaining blocking or Euclid findings.
+Session and inference contracts, architecture, and limitations were updated;
+the original closed transcript ECP remains unchanged as historical provenance.

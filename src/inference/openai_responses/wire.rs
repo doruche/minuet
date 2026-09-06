@@ -175,7 +175,7 @@ fn parse_output_item(value: Value) -> Result<ModelOutputItem, OpenAiResponsesBac
             if text.is_empty() {
                 OutputEffect::None
             } else {
-                OutputEffect::Text(text)
+                OutputEffect::Message(text)
             }
         },
         "function_call" => OutputEffect::ToolCall(ToolCall {
@@ -295,7 +295,9 @@ mod tests {
         let parsed = parse_response(response).unwrap();
         assert_eq!(parsed.output.len(), 3);
         assert!(matches!(parsed.output[0].effect(), OutputEffect::None));
-        assert!(matches!(parsed.output[1].effect(), OutputEffect::Text(text) if text == "calling"));
+        assert!(
+            matches!(parsed.output[1].effect(), OutputEffect::Message(text) if text == "calling")
+        );
         assert!(
             matches!(parsed.output[2].effect(), OutputEffect::ToolCall(call) if call.name == "echo")
         );
@@ -361,7 +363,7 @@ mod tests {
         });
         let parsed = parse_response(response).unwrap();
         assert!(
-            matches!(parsed.output[0].effect(), OutputEffect::Text(text) if text == "不能这样做请换个问题")
+            matches!(parsed.output[0].effect(), OutputEffect::Message(text) if text == "不能这样做请换个问题")
         );
     }
 }

@@ -25,9 +25,9 @@ impl AgentLoop for ReactLoop {
             let turn = context.infer_and_commit().await?;
             run_usage.observe(turn.usage);
 
-            if turn.tool_calls.is_empty() {
+            if !context.has_pending_tools() {
                 return Ok(RunOutcome {
-                    text: turn.text,
+                    text: turn.text_summary(),
                     model_turns: model_turn,
                     tool_activity: activities,
                     usage: run_usage,
@@ -35,10 +35,10 @@ impl AgentLoop for ReactLoop {
                 });
             }
             if model_turn == self.max_steps {
-                let skipped = context.skip_and_commit(turn.tool_calls).await?;
+                let skipped = context.skip_pending().await?;
                 activities.extend(skipped.activities);
                 return Ok(RunOutcome {
-                    text: turn.text,
+                    text: turn.text_summary(),
                     model_turns: model_turn,
                     tool_activity: activities,
                     usage: run_usage,
@@ -46,7 +46,7 @@ impl AgentLoop for ReactLoop {
                 });
             }
 
-            let tool_round = context.invoke_and_commit(turn.tool_calls).await?;
+            let tool_round = context.invoke_pending().await?;
             activities.extend(tool_round.activities);
         }
 

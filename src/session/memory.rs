@@ -1,5 +1,5 @@
 use super::{
-    ConversationItem, ModelOutputItem, SessionConfig, SessionId, SessionRepository,
+    ConversationItem, ModelCommit, ModelOutputItem, SessionConfig, SessionId, SessionRepository,
     SessionRepositoryError, SessionSnapshot, SessionSummary, TokenUsage, ToolExecution,
     ToolOutcome, TranscriptEntry, UsageSummary,
 };
@@ -12,6 +12,9 @@ pub struct MemorySessionRepository {
 }
 struct Record {
     items: Vec<ConversationItem>,
+    // Owner-private association for the one unresolved result batch. The slot
+    // selects its transcript invocation; the call ID encodes context output.
+    // clear discards both histories and this association together.
     pending: Vec<(usize, String)>,
     transcript: Vec<Arc<TranscriptEntry>>,
     config: SessionConfig,
@@ -58,6 +61,15 @@ impl SessionRepository for MemorySessionRepository {
             usage: s.usage.clone(),
         })
     }
+    fn ensure_ready(&self, id: SessionId) -> Result<(), SessionRepositoryError> {
+        if !self.get(id)?.pending.is_empty() {
+            return Err(SessionRepositoryError::InvalidToolRound {
+                id,
+                reason: "previous tool round has no committed results",
+            });
+        }
+        Ok(())
+    }
     fn transcript(
         &self,
         id: SessionId,
@@ -65,6 +77,7 @@ impl SessionRepository for MemorySessionRepository {
         Ok(self.get(id)?.transcript.clone())
     }
     fn commit_user(&mut self, id: SessionId, text: &str) -> Result<(), SessionRepositoryError> {
+        self.ensure_ready(id)?;
         let s = self.get_mut(id)?;
         s.items.push(ConversationItem::UserText(text.to_owned()));
         s.transcript.push(Arc::new(TranscriptEntry::UserMessage {
@@ -77,26 +90,23 @@ impl SessionRepository for MemorySessionRepository {
         id: SessionId,
         output: &[ModelOutputItem],
         usage: Option<TokenUsage>,
-    ) -> Result<(), SessionRepositoryError> {
+    ) -> Result<ModelCommit, SessionRepositoryError> {
+        self.ensure_ready(id)?;
         let s = self.get_mut(id)?;
-        if !s.pending.is_empty() {
-            return Err(SessionRepositoryError::InvalidToolRound {
-                id,
-                reason: "previous tool round is still pending",
-            });
-        }
+        let start = s.transcript.len();
         let mut calls = Vec::new();
         for item in output {
             match item.effect() {
                 OutputEffect::None => {},
-                OutputEffect::Text(text) if text.is_empty() => {},
-                OutputEffect::Text(text) => {
+                OutputEffect::Message(text) if text.is_empty() => {},
+                OutputEffect::Message(text) => {
                     s.transcript.push(Arc::new(TranscriptEntry::ModelMessage {
                         text: text.clone(),
                     }))
                 },
                 OutputEffect::ToolCall(call) => {
-                    calls.push((s.transcript.len(), call.call_id.clone()));
+                    s.pending.push((s.transcript.len(), call.call_id.clone()));
+                    calls.push(call.clone());
                     s.transcript.push(Arc::new(TranscriptEntry::ToolInvocation {
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
@@ -109,16 +119,21 @@ impl SessionRepository for MemorySessionRepository {
             ));
         }
         s.usage.observe(usage);
-        s.pending = calls;
-        Ok(())
+        Ok(ModelCommit {
+            entries: s.transcript[start..].to_vec(),
+            calls,
+        })
     }
     fn commit_tool_round(
         &mut self,
         id: SessionId,
         results: Vec<ToolOutcome>,
-    ) -> Result<(), SessionRepositoryError> {
+    ) -> Result<Vec<Arc<TranscriptEntry>>, SessionRepositoryError> {
         let s = self.get_mut(id)?;
         let invalid = |reason| SessionRepositoryError::InvalidToolRound { id, reason };
+        if s.pending.is_empty() {
+            return Err(invalid("no pending tool round"));
+        }
         if s.pending.len() != results.len() {
             return Err(invalid("result count differs from committed calls"));
         }
@@ -135,6 +150,7 @@ impl SessionRepository for MemorySessionRepository {
         }
         // All fallible validation precedes publication of either side. Retained
         // views keep their entries; only a changed invocation uses copy-on-write.
+        let mut committed = Vec::with_capacity(results.len());
         for ((index, call_id), result) in std::mem::take(&mut s.pending).into_iter().zip(results) {
             let (output, execution) = match result {
                 ToolOutcome::Completed(output) => {
@@ -153,10 +169,11 @@ impl SessionRepository for MemorySessionRepository {
                 unreachable!("validated above")
             };
             *current = execution;
+            committed.push(Arc::clone(&s.transcript[index]));
             s.items
                 .push(ConversationItem::FunctionCallOutput { call_id, output });
         }
-        Ok(())
+        Ok(committed)
     }
     fn clear(&mut self, id: SessionId) -> Result<(), SessionRepositoryError> {
         let s = self.get_mut(id)?;
@@ -226,14 +243,14 @@ mod tests {
         let mut store = MemorySessionRepository::default();
         let id = store.create(SessionConfig::default()).unwrap();
         store.commit_user(id, "question").unwrap();
-        store
+        let committed = store
             .commit_inference(
                 id,
                 &[
                     model(OutputEffect::None),
-                    model(OutputEffect::Text("before".into())),
+                    model(OutputEffect::Message("before".into())),
                     call("first"),
-                    model(OutputEffect::Text("after".into())),
+                    model(OutputEffect::Message("after".into())),
                     call("second"),
                 ],
                 Some(TokenUsage {
@@ -244,6 +261,22 @@ mod tests {
             )
             .unwrap();
         let before = store.transcript(id).unwrap();
+        assert_eq!(committed.entries, before[1..]);
+        assert!(
+            committed
+                .entries
+                .iter()
+                .zip(&before[1..])
+                .all(|(a, b)| Arc::ptr_eq(a, b))
+        );
+        assert_eq!(
+            committed
+                .calls
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
         let other_read = store.transcript(id).unwrap();
         assert!(
             before
@@ -255,7 +288,7 @@ mod tests {
         assert!(matches!(&*before[0], TranscriptEntry::UserMessage { text } if text == "question"));
         assert!(matches!(&*before[1], TranscriptEntry::ModelMessage { text } if text == "before"));
         assert!(matches!(&*before[3], TranscriptEntry::ModelMessage { text } if text == "after"));
-        store
+        let results = store
             .commit_tool_round(
                 id,
                 vec![
@@ -265,6 +298,8 @@ mod tests {
             )
             .unwrap();
         let after = store.transcript(id).unwrap();
+        assert!(Arc::ptr_eq(&results[0], &after[2]));
+        assert!(Arc::ptr_eq(&results[1], &after[4]));
         assert!(Arc::ptr_eq(&before[1], &after[1]));
         assert!(matches!(
             &*before[2],
@@ -294,6 +329,19 @@ mod tests {
         let b = store.create(SessionConfig::default()).unwrap();
         store.commit_inference(a, &[call("first")], None).unwrap();
         let before = store.transcript(a).unwrap();
+        let before_context = store.snapshot(a).unwrap();
+        assert!(store.commit_user(a, "must not append").is_err());
+        assert!(
+            store
+                .commit_inference(a, &[], Some(TokenUsage::default()))
+                .is_err()
+        );
+        assert_eq!(
+            store.snapshot(a).unwrap().items.len(),
+            before_context.items.len()
+        );
+        assert_eq!(store.snapshot(a).unwrap().usage, before_context.usage);
+        assert!(store.commit_tool_round(b, vec![]).is_err());
         assert!(
             store
                 .commit_tool_round(b, vec![ToolOutcome::Completed("wrong".into())])

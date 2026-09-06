@@ -278,7 +278,8 @@ impl KernelTask {
             prompt,
             crate::agent_loop::RunEvents(events),
         )?;
-        agent_loop.run(&mut context).await.map_err(Into::into)
+        let result = agent_loop.run(&mut context).await;
+        context.finish(result).map_err(Into::into)
     }
 }
 
@@ -422,7 +423,7 @@ mod tests {
                     usage: Some(usage(10, 3)),
                 },
                 InferenceResponse {
-                    output: vec![output(OutputEffect::Text("done".to_owned()))],
+                    output: vec![output(OutputEffect::Message("done".to_owned()))],
                     usage: Some(usage(15, 2)),
                 },
             ])),
@@ -539,8 +540,10 @@ mod tests {
             RunEvent::InferenceStarted
         ));
         assert!(
-            matches!(event(&mut receiver).await, RunEvent::ToolFinished { activity, .. }
-            if activity.status == crate::agent_loop::ToolActivityStatus::Skipped)
+            matches!(event(&mut receiver).await, RunEvent::ToolRoundCommitted { entries }
+            if matches!(entries[0].as_ref(), TranscriptEntry::ToolInvocation {
+                execution: crate::session::ToolExecution::Skipped(_), ..
+            }))
         );
         assert!(
             receiver.recv().await.is_none(),
@@ -572,7 +575,7 @@ mod tests {
                     usage: Some(usage(1, 1)),
                 },
                 InferenceResponse {
-                    output: vec![output(OutputEffect::Text("continued".to_owned()))],
+                    output: vec![output(OutputEffect::Message("continued".to_owned()))],
                     usage: Some(usage(2, 1)),
                 },
             ])),
@@ -675,7 +678,7 @@ mod tests {
         }]);
         if followup {
             responses.push_back(InferenceResponse {
-                output: vec![output(OutputEffect::Text("answer".into()))],
+                output: vec![output(OutputEffect::Message("answer".into()))],
                 usage: None,
             });
         }
@@ -759,7 +762,7 @@ mod tests {
                     assert!(text.len() <= 4096);
                     streamed.push_str(&text);
                 },
-                RunEvent::ToolFinished { activity, .. } => {
+                RunEvent::ToolExecutionFinished { activity, .. } => {
                     assert_eq!(
                         activity.status,
                         crate::agent_loop::ToolActivityStatus::Completed
@@ -771,6 +774,12 @@ mod tests {
             }
         }
         assert_eq!(streamed, format!("{}完成\n", "中".repeat(5000)));
+        assert!(
+            matches!(event(&mut receiver).await, RunEvent::ToolRoundCommitted { entries }
+            if matches!(entries[0].as_ref(), TranscriptEntry::ToolInvocation {
+                execution: crate::session::ToolExecution::Completed(_), ..
+            }))
+        );
         assert!(matches!(
             event(&mut receiver).await,
             RunEvent::InferenceStarted
@@ -778,7 +787,8 @@ mod tests {
         assert_eq!(run.await.unwrap().unwrap().text, "answer");
         assert!(matches!(
             receiver.recv().await,
-            Some(RunEvent::ModelTurnCommitted { text, .. }) if text == "answer"
+            Some(RunEvent::ModelTurnCommitted { entries })
+                if matches!(entries[0].as_ref(), TranscriptEntry::ModelMessage { text } if text == "answer")
         ));
         assert!(receiver.recv().await.is_none());
         {
@@ -809,7 +819,7 @@ mod tests {
         release.notify_one();
         let mut saw_failure = false;
         while let Some(event) = receiver.recv().await {
-            if let RunEvent::ToolFinished { activity, .. } = event {
+            if let RunEvent::ToolExecutionFinished { activity, .. } = event {
                 assert_eq!(
                     activity.status,
                     crate::agent_loop::ToolActivityStatus::Error
@@ -901,11 +911,11 @@ mod tests {
         let backend = Arc::new(ScriptedBackend {
             responses: Mutex::new(VecDeque::from([
                 InferenceResponse {
-                    output: vec![output(OutputEffect::Text("answer A".into()))],
+                    output: vec![output(OutputEffect::Message("answer A".into()))],
                     usage: Some(usage(2, 3)),
                 },
                 InferenceResponse {
-                    output: vec![output(OutputEffect::Text("answer B".into()))],
+                    output: vec![output(OutputEffect::Message("answer B".into()))],
                     usage: None,
                 },
             ])),
@@ -1002,6 +1012,63 @@ mod tests {
             }
         )));
         assert_eq!(backend.seen_inputs.lock().unwrap().len(), 2);
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kernel_rejects_policy_completion_with_unresolved_calls() {
+        struct UnfinishedPolicy;
+        #[async_trait]
+        impl AgentLoop for UnfinishedPolicy {
+            async fn run(&self, context: &mut LoopContext<'_>) -> Result<RunOutcome, LoopError> {
+                let turn = context.infer_and_commit().await?;
+                Ok(RunOutcome {
+                    text: turn.text_summary(),
+                    model_turns: 1,
+                    tool_activity: vec![],
+                    usage: UsageSummary::default(),
+                    stop_reason: crate::agent_loop::RunStopReason::Completed,
+                })
+            }
+        }
+        let backend = Arc::new(ScriptedBackend {
+            responses: Mutex::new(VecDeque::from([InferenceResponse {
+                output: vec![output(OutputEffect::ToolCall(ToolCall {
+                    call_id: "x".into(),
+                    name: "echo".into(),
+                    arguments: "{}".into(),
+                }))],
+                usage: None,
+            }])),
+            seen_inputs: Mutex::new(Vec::new()),
+            input_tokens: 0,
+        });
+        let running = start(
+            KernelComponents {
+                backend: backend.clone(),
+                store: Box::new(MemorySessionStore::default()),
+                tools: ToolRegistry::with_builtins(&["echo".into()]).unwrap(),
+                agent_loop: Arc::new(UnfinishedPolicy),
+                context: Arc::new(FullContext),
+            },
+            options(),
+        )
+        .unwrap();
+        let h = running.handle();
+        let id = h.active_session().await.unwrap();
+        assert!(h.run("first").await.is_err());
+        let before = h.switch_session(id).await.unwrap();
+        assert_eq!(before.entries.len(), 2);
+        assert!(matches!(
+            before.entries[1].as_ref(),
+            TranscriptEntry::ToolInvocation {
+                execution: crate::session::ToolExecution::Pending,
+                ..
+            }
+        ));
+        assert!(h.run("must not append").await.is_err());
+        assert_eq!(h.switch_session(id).await.unwrap().entries, before.entries);
+        assert_eq!(backend.seen_inputs.lock().unwrap().len(), 1);
         running.shutdown().await.unwrap();
     }
 }

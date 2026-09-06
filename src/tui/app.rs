@@ -9,6 +9,7 @@ use crossterm::event::{self, Event};
 use minuet::{
     agent_loop::{RunEvent, RunOutcome, RunStopReason},
     kernel::{KernelError, KernelHandle, RunRequest},
+    session::{ToolExecution, TranscriptEntry},
 };
 use tokio::sync::mpsc;
 
@@ -180,8 +181,6 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                     Reply::Run(Ok(outcome)) => {
                         if outcome.text.is_empty() {
                             screen.line("(no text output)", Tone::Meta)?;
-                        } else {
-                            screen.markdown(&outcome.text)?;
                         }
                         if outcome.stop_reason == RunStopReason::StepLimit {
                             screen.line("run stopped: model-turn limit reached; pending tool calls were not executed", Tone::Error)?;
@@ -212,11 +211,8 @@ fn progress(screen: &mut Screen, status: &mut String, event: RunEvent) -> io::Re
     match event {
         RunEvent::InferenceStarted => *status = "Waiting for model…".into(),
         RunEvent::ModelTextDelta { text } => screen.model_delta(&text),
-        RunEvent::ModelTurnCommitted {
-            text,
-            has_tool_calls,
-        } => {
-            screen.model_commit(&text, has_tool_calls)?;
+        RunEvent::ModelTurnCommitted { entries } => {
+            screen.publish_entries(&entries)?;
             *status = "Continuing…".into();
         },
         RunEvent::ToolStarted { name, .. } => {
@@ -224,13 +220,28 @@ fn progress(screen: &mut Screen, status: &mut String, event: RunEvent) -> io::Re
             screen.line(&format!("Running {name}"), Tone::Meta)?;
         },
         RunEvent::ToolOutput { text, .. } => screen.fragment(&text, Tone::Text)?,
-        RunEvent::ToolFinished {
+        RunEvent::ToolExecutionFinished {
             activity, elapsed, ..
         } => {
             let (label, tone) = render::tool_result(&activity, elapsed);
             screen.line(&label, tone)?;
             screen.line("Result:", Tone::Meta)?;
             screen.line(&activity.output, Tone::Text)?;
+            *status = "Continuing…".into();
+        },
+        RunEvent::ToolRoundCommitted { entries } => {
+            // Every executed result has already been observed on this ordered
+            // run channel. Only skipped work lacks an execution observation.
+            // This is publication deduplication, never transcript mutation.
+            for entry in &entries {
+                if let TranscriptEntry::ToolInvocation {
+                    execution: execution @ ToolExecution::Skipped(_),
+                    ..
+                } = entry.as_ref()
+                {
+                    screen.tool_execution(execution)?;
+                }
+            }
             *status = "Continuing…".into();
         },
     }

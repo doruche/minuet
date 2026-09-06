@@ -630,7 +630,11 @@ fn pty_markdown_publishes_blocks_links_and_highlighting_then_restores_input() {
         pty.parser.screen_mut().set_size(24, 30);
         pty.release();
         pty.wait_for(
-            |p| p.frame_complete() && p.parser.screen().contents().contains("assistant-finished"),
+            |p| {
+                p.frame_complete()
+                    && p.parser.screen().contents().contains("assistant-finished")
+                    && p.parser.screen().contents().contains("Completed ·")
+            },
             "Markdown complete",
         );
         let screen = pty.parser.screen();
@@ -723,8 +727,17 @@ fn pty_unclosed_model_code_cannot_capture_the_run_limit_notice() {
     let contents = pty.parser.screen().contents();
     assert!(!contents.contains("Completed · "));
     assert!(!contents.contains("Waiting for model…"));
+    assert_eq!(
+        contents.matches("fn partial() {}").count(),
+        1,
+        "{contents:?}"
+    );
     assert!(
-        contents.contains("fn partial() {}\nrun stopped:"),
+        contents.find("fn partial() {}") < contents.find("Tool: stream"),
+        "{contents:?}"
+    );
+    assert!(
+        contents.find("Tool: stream") < contents.find("run stopped:"),
         "{contents:?}"
     );
     let row = contents
@@ -826,7 +839,11 @@ fn pty_shift_enter_and_ctrl_o_preserve_manual_newlines_and_restore_keyboard_mode
         );
         pty.release();
         pty.wait_for(
-            |p| p.frame_complete() && p.parser.screen().contents().contains("assistant-finished"),
+            |p| {
+                p.frame_complete()
+                    && p.parser.screen().contents().contains("assistant-finished")
+                    && p.parser.screen().contents().contains("Completed ·")
+            },
             "run complete",
         );
         pty.send(b"/exit\r");
@@ -957,7 +974,11 @@ fn pty_edits_chinese_pastes_multiline_and_streams_before_tool_return() {
     pty.send(b"must-not-queue\r");
     pty.release();
     pty.wait_for(
-        |p| p.parser.screen().contents().contains("assistant-finished"),
+        |p| {
+            p.frame_complete()
+                && p.parser.screen().contents().contains("assistant-finished")
+                && p.parser.screen().contents().contains("Completed ·")
+        },
         "final answer",
     );
     assert!(String::from_utf8_lossy(&pty.raw).contains("final-tool-result"));
@@ -1010,7 +1031,11 @@ fn pty_failure_keeps_progress_and_resize_keeps_input_usable() {
     );
     pty.release();
     pty.wait_for(
-        |p| p.parser.screen().contents().contains("assistant-finished"),
+        |p| {
+            p.frame_complete()
+                && p.parser.screen().contents().contains("assistant-finished")
+                && p.parser.screen().contents().contains("Completed ·")
+        },
         "answer after tool failure",
     );
     let visible = pty.parser.screen().contents();
@@ -1314,4 +1339,163 @@ fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
         pty.send(b"/exit\r");
         pty.finish();
     }
+}
+
+#[test]
+fn pty_live_and_replay_preserve_interleaving_and_independent_markdown_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let message =
+        |text: &str| json!({"type":"message","content":[{"type":"output_text","text":text}]});
+    std::fs::write(
+        directory.path().join("first-response.json"),
+        json!({"status":"completed","output":[
+            message("[cross][ref]\n\n"),
+            message("[ref]: https://example.test/cross\n\n**separate-message**"),
+            {"type":"function_call","call_id":"x","name":"stream","arguments":"{\"n\":1}"},
+            message("```rust\nfn partial() {}"),
+            {"type":"function_call","call_id":"y","name":"stream","arguments":"{\"n\":2}"},
+            message("**after-fence**"),
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+    command.args(["--exact", "terminal_fixture", "--nocapture"]);
+    command.env(FIXTURE_ENV, directory.path());
+    let mut pty = Pty::start_process(command, directory, Some(false), true);
+    pty.ready();
+    pty.send(b"/session info\r");
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains(": 0 items"),
+        "session identity",
+    );
+    let id = pty
+        .parser
+        .screen()
+        .contents()
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("session ")
+                .and_then(|rest| rest.split_once(':'))
+                .map(|(id, _)| id.to_owned())
+        })
+        .unwrap();
+    // Keep the short semantic transcript visible while testing both live and
+    // replay. The fixture's streamed rows still exercise native scrollback.
+    pty.master
+        .resize(PtySize {
+            rows: 40,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    pty.parser.screen_mut().set_size(40, 100);
+    let run_start = pty.raw.len();
+    pty.send(b"ordered question\r");
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains("执行片段-alpha"),
+        "first tool's live output",
+    );
+    let live = pty.parser.screen().contents();
+    let expected = [
+        "[cross][ref]",
+        "separate-message",
+        "Tool: stream({\"n\":1})",
+        "fn partial() {}",
+        "Tool: stream({\"n\":2})",
+        "after-fence",
+    ];
+    let assert_order = |contents: &str| {
+        let mut previous = None;
+        for text in expected {
+            assert_eq!(contents.matches(text).count(), 1, "{text}: {contents}");
+            let position = contents.find(text).unwrap();
+            if let Some(previous) = previous {
+                assert!(previous < position, "out of order: {contents}");
+            }
+            previous = Some(position);
+        }
+    };
+    assert_order(&live);
+    let assert_markdown = |screen: &vt100::Screen| {
+        let contents = screen.contents();
+        for text in ["separate-message", "after-fence"] {
+            let (row, line) = contents
+                .lines()
+                .enumerate()
+                .find(|(_, line)| line.contains(text))
+                .unwrap();
+            let col = line.find(text).unwrap();
+            assert!(
+                screen.cell(row as u16, col as u16).unwrap().bold(),
+                "message lost its Markdown document: {text}"
+            );
+        }
+    };
+    assert_markdown(pty.parser.screen());
+    assert!(live.find("after-fence") < live.find("Running stream"));
+    assert!(
+        !live.contains("Result:"),
+        "no execution result before release"
+    );
+    assert!(
+        !String::from_utf8_lossy(&pty.raw[run_start..])
+            .contains("\x1b]8;;https://example.test/cross"),
+        "separate documents incorrectly resolved a reference"
+    );
+    pty.release();
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains("Completed ·"),
+        "run completion",
+    );
+    // Final results appear once per executed invocation, not again at commit.
+    assert_eq!(
+        String::from_utf8_lossy(&pty.raw[run_start..])
+            .matches("final-tool-result")
+            .count(),
+        2
+    );
+    let request: Value = serde_json::from_slice(
+        &std::fs::read(pty.directory.path().join("request-1.json")).unwrap(),
+    )
+    .unwrap();
+    let outputs: Vec<_> = request["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .collect();
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0]["call_id"], "x");
+    assert_eq!(outputs[1]["call_id"], "y");
+    let executed = std::fs::metadata(pty.directory.path().join("executed"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let replay_start = pty.raw.len();
+    pty.send(format!("/session switch {id}\r").as_bytes());
+    pty.wait_for(
+        |p| p.frame_complete() && p.parser.screen().contents().contains("switched to session"),
+        "ordered replay",
+    );
+    let replay = pty.parser.screen().contents();
+    assert_order(&replay);
+    assert_markdown(pty.parser.screen());
+    assert!(!replay.contains("row-49"));
+    assert_eq!(replay.matches("final-tool-result").count(), 2);
+    assert!(
+        !String::from_utf8_lossy(&pty.raw[replay_start..])
+            .contains("\x1b]8;;https://example.test/cross")
+    );
+    assert_eq!(
+        std::fs::metadata(pty.directory.path().join("executed"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        executed
+    );
+    pty.send(b"/exit\r");
+    pty.finish();
 }

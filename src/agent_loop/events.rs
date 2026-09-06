@@ -1,9 +1,9 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::{inference::InferenceObserver, tool::ToolOutput};
+use crate::{inference::InferenceObserver, session::TranscriptEntry, tool::ToolOutput};
 
 use super::ToolActivity;
 
@@ -11,6 +11,10 @@ use super::ToolActivity;
 /// session commit or run success; the run's returned Result remains authoritative
 /// for its overall outcome. Call IDs correlate output with the current call,
 /// not with a globally unique task or a separately writable execution registry.
+/// A run observer is attached at submission, never midway through a round.
+/// Each executed result has one execution-finished observation before its
+/// committed update; skipped results have only the committed update. Closing
+/// the observer drops subsequent observations without affecting commitment.
 #[derive(Clone, Debug)]
 pub enum RunEvent {
     InferenceStarted,
@@ -18,8 +22,7 @@ pub enum RunEvent {
         text: String,
     },
     ModelTurnCommitted {
-        text: String,
-        has_tool_calls: bool,
+        entries: Vec<Arc<TranscriptEntry>>,
     },
     ToolStarted {
         call_id: String,
@@ -29,10 +32,15 @@ pub enum RunEvent {
         call_id: String,
         text: String,
     },
-    ToolFinished {
+    ToolExecutionFinished {
         call_id: String,
         activity: ToolActivity,
         elapsed: Duration,
+    },
+    /// Repository-confirmed invocation snapshots, in call order. Execution
+    /// observations may precede this event; skipped calls emit only this event.
+    ToolRoundCommitted {
+        entries: Vec<Arc<TranscriptEntry>>,
     },
 }
 

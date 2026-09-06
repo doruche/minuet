@@ -15,6 +15,21 @@ Minuet-owned user messages, model messages, and grouped tool invocations with
 typed pending, completed, failed, or skipped execution states. Neither history
 is reconstructed from the other.
 
+User, model, and tool-round commits atomically publish their matching facts;
+rejection leaves context, transcript, and usage unchanged. Model commit returns
+the ordered entries actually committed and their confirmed immutable execution
+requests. Tool-round commit accepts results in that call order and returns the
+updated invocation snapshots. An absent round, including an empty result batch,
+is a protocol error. No caller reconstructs committed input from observations.
+
+Transcript message boundaries come from the backend's complete messages and
+remain unchanged in live rendering and replay. Calls occupy their model-output
+positions; grouped results do not assert execution between adjacent messages.
+`Pending` means no committed result, not proof that execution has not occurred.
+Repository readiness checks prevent new user input or model commits while a
+previous round is unresolved. The execution obligation and publication rules
+are specified in [the loop contract](../agent-loop/execution.md).
+
 Consumers receive immutable transcript views whose entries may be shared with
 the repository and may become stale after later mutations. The agent loop
 commits matching context and transcript facts through repository operations;
@@ -33,3 +48,7 @@ Model/provider, loop, and context strategy are startup-fixed. Session-owned
 runtime policy currently includes reasoning effort and enabled tool names.
 Tool implementations are process-level registry capabilities; each turn uses
 one immutable snapshot resolved from the active session's selection.
+
+Evidence: inline repository and kernel tests cover atomic rejection, immutable
+reads, ordered commits, session isolation and lifecycle. Terminal integration
+tests cover message boundaries, ordered replay, and replay without execution.

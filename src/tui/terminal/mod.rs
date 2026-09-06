@@ -241,6 +241,13 @@ impl Screen {
                 viewport: Viewport::Inline(area.height),
             },
         )?;
+        self.publish_entries(entries)
+    }
+
+    /// Live commits and replay share message/document boundaries and call
+    /// presentation. Terminal publication and viewport handoffs remain here.
+    pub fn publish_entries(&mut self, entries: &[Arc<TranscriptEntry>]) -> io::Result<()> {
+        self.preview.clear();
         for entry in entries {
             match entry.as_ref() {
                 TranscriptEntry::UserMessage { text } => {
@@ -256,24 +263,26 @@ impl Screen {
                     execution,
                 } => {
                     self.line(&format!("Tool: {name}({arguments})"), Tone::Meta)?;
-                    match execution {
-                        ToolExecution::Pending => self.line("No committed result", Tone::Meta)?,
-                        ToolExecution::Completed(output) => {
-                            self.line("Completed · Result:", Tone::Meta)?;
-                            self.line(output, Tone::Text)?;
-                        },
-                        ToolExecution::Failed(error) => {
-                            self.line("Failed · Result:", Tone::Error)?;
-                            self.line(error, Tone::Text)?;
-                        },
-                        ToolExecution::Skipped(reason) => {
-                            self.line(&format!("Skipped: {reason}"), Tone::Meta)?
-                        },
-                    }
+                    self.tool_execution(execution)?;
                 },
             }
         }
         Ok(())
+    }
+
+    pub fn tool_execution(&mut self, execution: &ToolExecution) -> io::Result<()> {
+        match execution {
+            ToolExecution::Pending => self.line("No committed result", Tone::Meta),
+            ToolExecution::Completed(output) => {
+                self.line("Completed · Result:", Tone::Meta)?;
+                self.line(output, Tone::Text)
+            },
+            ToolExecution::Failed(error) => {
+                self.line("Failed · Result:", Tone::Error)?;
+                self.line(error, Tone::Text)
+            },
+            ToolExecution::Skipped(reason) => self.line(&format!("Skipped: {reason}"), Tone::Meta),
+        }
     }
 
     fn draw_frame(&mut self, input: &Input, status: Option<render::Status<'_>>) -> io::Result<()> {
@@ -329,15 +338,6 @@ impl Screen {
 
     pub fn advance_model_preview(&mut self) -> bool {
         self.preview.advance(Instant::now())
-    }
-
-    pub fn model_commit(&mut self, text: &str, publish: bool) -> io::Result<()> {
-        self.preview.clear();
-        if publish && !text.is_empty() {
-            self.markdown(text)
-        } else {
-            Ok(())
-        }
     }
 
     pub fn model_failed(&mut self) -> io::Result<()> {

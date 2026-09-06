@@ -44,8 +44,9 @@ pub struct ToolStatus {
 pub struct ToolInvocation {
     /// JSON protocol text committed to model history by the loop.
     pub output: String,
-    /// Execution status for observers; the encoded output remains authoritative
-    /// for the model-facing protocol.
+    /// Tool-boundary execution classification, used to create the typed session
+    /// outcome and its observations. The encoded output is model-facing text;
+    /// consumers must not decode it to rediscover execution status.
     pub is_error: bool,
 }
 

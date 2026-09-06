@@ -77,7 +77,9 @@ impl ModelOutputItem {
 #[derive(Clone, Debug)]
 pub enum OutputEffect {
     None,
-    Text(String),
+    /// One complete model message. Its document boundary is independent of
+    /// stream fragments and of other messages returned in the same response.
+    Message(String),
     ToolCall(ToolCall),
 }
 

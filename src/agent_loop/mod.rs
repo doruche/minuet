@@ -1,9 +1,10 @@
 use async_trait::async_trait;
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::{
-    inference::{InferenceError, TokenUsage, ToolCall},
-    session::{SessionStoreError, UsageSummary},
+    inference::{InferenceError, TokenUsage},
+    session::{SessionStoreError, TranscriptEntry, UsageSummary},
 };
 
 mod events;
@@ -21,26 +22,21 @@ pub trait AgentLoop: Send + Sync {
 }
 
 pub struct CommittedModelTurn {
-    pub tool_calls: PendingToolRound,
-    pub text: String,
+    pub entries: Vec<Arc<TranscriptEntry>>,
     pub usage: Option<TokenUsage>,
 }
 
-/// Tool calls returned by one committed model turn. The call list is created
-/// only by `LoopContext::infer_and_commit` and is consumed by exactly one tool
-/// round operation, so a loop cannot fabricate or reuse calls against a
-/// different model response.
-pub struct PendingToolRound {
-    calls: Vec<ToolCall>,
-}
-
-impl PendingToolRound {
-    pub fn is_empty(&self) -> bool {
-        self.calls.is_empty()
-    }
-
-    pub fn calls(&self) -> &[ToolCall] {
-        &self.calls
+impl CommittedModelTurn {
+    /// Lossy final-text summary for consumers such as the one-shot CLI. This
+    /// concatenation must never define presentation order or document boundaries.
+    pub fn text_summary(&self) -> String {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry.as_ref() {
+                TranscriptEntry::ModelMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -50,6 +46,8 @@ pub struct CommittedToolRound {
 
 #[derive(Clone, Debug)]
 pub struct RunOutcome {
+    /// Ordered concatenation of the final turn's messages for summary consumers;
+    /// not an alternate presentation history or a Markdown document boundary.
     pub text: String,
     pub model_turns: usize,
     pub tool_activity: Vec<ToolActivity>,
@@ -83,6 +81,14 @@ pub enum LoopError {
     EmptyPrompt,
     #[error("loop.max_steps must be greater than zero")]
     InvalidMaxSteps,
+    #[error("loop protocol violation: {0}")]
+    Protocol(&'static str),
+    #[error("{source}; run also ended with unresolved session state: {pending}")]
+    UnfinishedRun {
+        #[source]
+        source: Box<LoopError>,
+        pending: Box<LoopError>,
+    },
     #[error(transparent)]
     Inference(#[from] InferenceError),
     #[error(transparent)]

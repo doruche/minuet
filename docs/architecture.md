@@ -12,14 +12,17 @@ that each module will become a crate.
 - `session` owns the repository, provider context, semantic transcript, session
   settings, usage, and derived summaries. Kernel owns the active session ID;
   each turn receives immutable session and tool snapshots. Transcript reads are
-  immutable presentation snapshots. All snapshots are consumed during
-  serialized kernel processing.
+  immutable presentation snapshots. Execution snapshots are taken during
+  serialized kernel processing; frontends may retain stale presentation views.
 - `agent_loop` owns inference/tool sequencing policy through a narrow
-  `LoopContext` capability.
+  `LoopContext` capability. The context retains single-use execution requests;
+  session alone determines whether their results have committed. Kernel checks
+  run completion through that capability before replying.
 - `context` selects the model-visible view of committed history without a
   second writable conversation.
-- `tool` owns the compiled tool set and enabled subset. JSON is the internal
-  heterogeneous tool value protocol; provider adapters own wire encoding.
+- `tool` owns the compiled tool set and resolves immutable invocation snapshots
+  from session-owned tool selection. JSON is the internal heterogeneous tool
+  value protocol; provider adapters own wire encoding.
 - `inference` defines the protocol-neutral backend capability; the
   `openai_responses` adapter owns OpenAI Responses JSON and HTTP behavior.
 - `config` resolves provider credentials at startup into a private snapshot.
@@ -55,7 +58,16 @@ history for user messages, model text, and grouped tool invocations. Repository
 commit operations update the matching facts together; neither history is
 derived from the other after commit.
 
+Model commit returns the ordered presentation entries and confirmed execution
+requests. Runtime publishes those entries without another semantic projection;
+each inference reads fresh committed context through `ContextStrategy`. Loop
+policy cannot retain or resubmit a tool round. Execution consumes the context's
+requests once, while repository readiness independently checks the result-commit
+obligation. Tool execution observations precede the atomic batch-result commit.
+
 The TUI has one terminal input reader and restores terminal modes on normal,
 error, and interrupted exits. Live progress is presentation data, not session
-history. The TUI consumes immutable transcript views for replay and owns
-neither history mutation nor execution cancellation.
+history. Live committed messages and replay share entry rendering and Markdown
+document boundaries. The final run reply does not republish model text; its
+text summary remains available to the one-shot CLI. TUI owns neither history
+mutation nor execution cancellation.

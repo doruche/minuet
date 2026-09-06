@@ -4,7 +4,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    inference::{ConversationItem, ModelOutputItem, TokenUsage},
+    inference::{ConversationItem, ModelOutputItem, TokenUsage, ToolCall},
     model::ReasoningEffort,
 };
 
@@ -92,10 +92,22 @@ pub enum ToolOutcome {
     },
 }
 
+/// The repository's successful model-commit handoff. Entries are immutable
+/// presentation snapshots; calls are execution requests, not writable states.
+pub struct ModelCommit {
+    pub entries: Vec<Arc<TranscriptEntry>>,
+    pub calls: Vec<ToolCall>,
+}
+
+/// Serialized session mutations. Each commit validates before publishing its
+/// matching context/transcript/usage facts; failure leaves all of them unchanged.
 pub trait SessionRepository: Send {
     fn create(&mut self, config: SessionConfig) -> Result<SessionId, SessionRepositoryError>;
     fn list(&self) -> Vec<SessionSummary>;
     fn snapshot(&self, id: SessionId) -> Result<SessionSnapshot, SessionRepositoryError>;
+    /// Checks the repository-owned round invariant before new input, network
+    /// work, or successful run completion. This does not authorize execution.
+    fn ensure_ready(&self, id: SessionId) -> Result<(), SessionRepositoryError>;
     /// The returned entries are immutable read snapshots. Cloning this view
     /// shares message payloads; later repository mutations do not change it.
     fn transcript(
@@ -105,20 +117,23 @@ pub trait SessionRepository: Send {
     /// Accepts one user message into context and presentation history together.
     fn commit_user(&mut self, id: SessionId, text: &str) -> Result<(), SessionRepositoryError>;
     /// Commits the backend's semantic projections and opaque continuations with
-    /// usage in one mutation. Tool calls remain pending until their round ends.
+    /// usage in one mutation. The returned entries and calls preserve output
+    /// order. Tool calls remain pending until their result batch commits.
     fn commit_inference(
         &mut self,
         id: SessionId,
         output: &[ModelOutputItem],
         usage: Option<TokenUsage>,
-    ) -> Result<(), SessionRepositoryError>;
+    ) -> Result<ModelCommit, SessionRepositoryError>;
     /// Completes the one pending tool round owned by this serialized session.
-    /// Validation precedes publication of context outputs and terminal states.
+    /// Results correspond positionally to the calls returned by model commit.
+    /// Rejects absent rounds, including an empty result batch. Validation
+    /// precedes publication; returned terminal snapshots are in call order.
     fn commit_tool_round(
         &mut self,
         id: SessionId,
         results: Vec<ToolOutcome>,
-    ) -> Result<(), SessionRepositoryError>;
+    ) -> Result<Vec<Arc<TranscriptEntry>>, SessionRepositoryError>;
     fn clear(&mut self, id: SessionId) -> Result<(), SessionRepositoryError>;
     fn delete(&mut self, id: SessionId) -> Result<(), SessionRepositoryError>;
     fn set_config(
@@ -140,7 +155,7 @@ pub enum SessionRepositoryError {
     NotFound(SessionId),
     #[error("session {0} already exists")]
     AlreadyExists(SessionId),
-    #[error("cannot commit tool round for session {id}: {reason}")]
+    #[error("session {id} tool-round protocol violation: {reason}")]
     InvalidToolRound { id: SessionId, reason: &'static str },
 }
 

@@ -9,7 +9,7 @@ that each module will become a crate.
 
 - `kernel` is the command sequencer and sole owner of runtime transitions.
   Consumers receive `KernelHandle`, never the store, registry, or their locks.
-- `session` owns committed conversation items, session settings, and usage.
+- `session` owns the session repository, committed conversation items, session settings, usage, and derived summaries. Kernel owns the active session ID; each turn receives an immutable session and tool snapshot.
   Snapshots are immutable and consumed during serialized kernel processing.
 - `agent_loop` owns inference/tool sequencing policy through a narrow
   `LoopContext` capability.

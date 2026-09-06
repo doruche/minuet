@@ -7,7 +7,7 @@ the source for ownership and dependency rationale.
 
 ## Session lifetime
 
-Sessions exist only in process memory. Restarting Minuet loses conversation
+Sessions exist only in process memory. Each process starts with a fresh UUID session; session list/switch/clear/delete are available in the TUI, while terminal scrollback is not replayed on creation or switching. Restarting Minuet loses conversation
 history, session settings, and usage summaries. There is no persistence,
 session export, or cross-process session sharing.
 

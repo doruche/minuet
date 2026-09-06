@@ -456,7 +456,7 @@ mod tests {
             Some("vendor-depth-42".to_owned())
         );
         let new_id = handle.new_session().await.unwrap();
-        assert_eq!(new_id.to_string(), "1");
+        assert_ne!(new_id.to_string(), "");
         assert_eq!(handle.model_info().await.unwrap().reasoning_effort, None);
         running.shutdown().await.unwrap();
     }

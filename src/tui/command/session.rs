@@ -30,7 +30,7 @@ impl Command {
                 Ok(format!("active session {id}"))
             },
             Self::Switch { id } => {
-                let id = SessionId::parse(&id).map_err(|e| KernelError::SessionId(e))?;
+                let id = SessionId::parse(&id).map_err(KernelError::SessionId)?;
                 Ok(format!(
                     "switched to session {}",
                     kernel.switch_session(id).await?
@@ -41,7 +41,7 @@ impl Command {
                 Ok("cleared conversation history".into())
             },
             Self::Delete { id } => {
-                let id = SessionId::parse(&id).map_err(|e| KernelError::SessionId(e))?;
+                let id = SessionId::parse(&id).map_err(KernelError::SessionId)?;
                 kernel.delete_session(id).await?;
                 Ok(format!("deleted session {}", id))
             },

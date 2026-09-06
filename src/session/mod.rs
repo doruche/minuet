@@ -117,6 +117,10 @@ pub enum SessionRepositoryError {
     AlreadyExists(SessionId),
 }
 
+pub use SessionRepository as SessionStore;
+pub use SessionRepositoryError as SessionStoreError;
+pub use memory::MemorySessionRepository as MemorySessionStore;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,7 +136,3 @@ mod tests {
         assert_eq!(usage.unreported_calls, 1);
     }
 }
-
-pub use SessionRepository as SessionStore;
-pub use SessionRepositoryError as SessionStoreError;
-pub use memory::MemorySessionRepository as MemorySessionStore;

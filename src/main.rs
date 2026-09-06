@@ -53,6 +53,7 @@ async fn run(invocation: cli::Invocation) -> Result<ExitCode, Box<dyn Error>> {
         KernelOptions {
             model: config.model,
             default_reasoning_effort: config.default_reasoning_effort,
+            default_enabled_tools: config.enabled_tools,
         },
     )?;
     let frontend_result = match invocation {

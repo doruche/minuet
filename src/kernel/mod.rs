@@ -22,6 +22,7 @@ const COMMAND_BUFFER: usize = 16;
 pub struct KernelOptions {
     pub model: ModelSelection,
     pub default_reasoning_effort: Option<ReasoningEffort>,
+    pub default_enabled_tools: Vec<String>,
 }
 
 pub struct KernelComponents {
@@ -52,6 +53,7 @@ pub fn start(
         context: components.context,
         model: options.model,
         default_reasoning_effort: options.default_reasoning_effort,
+        default_enabled_tools: options.default_enabled_tools,
         active_session,
         receiver,
     };
@@ -93,6 +95,7 @@ struct KernelTask {
     context: Arc<dyn ContextStrategy>,
     model: ModelSelection,
     default_reasoning_effort: Option<ReasoningEffort>,
+    default_enabled_tools: Vec<String>,
     active_session: SessionId,
     receiver: mpsc::Receiver<Command>,
 }
@@ -114,6 +117,15 @@ impl KernelTask {
                 },
                 Command::ClearSession(Envelope { reply, .. }) => {
                     let _ = reply.send(self.clear_session());
+                },
+                Command::ListSessions(Envelope { reply, .. }) => {
+                    let _ = reply.send(Ok(self.store.list()));
+                },
+                Command::SwitchSession(Envelope { payload, reply }) => {
+                    let _ = reply.send(self.switch_session(payload));
+                },
+                Command::DeleteSession(Envelope { payload, reply }) => {
+                    let _ = reply.send(self.delete_session(payload));
                 },
                 Command::ModelInfo(Envelope { reply, .. }) => {
                     let _ = reply.send(self.model_info());
@@ -163,10 +175,22 @@ impl KernelTask {
     fn new_session(&mut self) -> Result<SessionId, KernelError> {
         let id = self.store.create(SessionConfig {
             reasoning_effort: self.default_reasoning_effort.clone(),
-            enabled_tools: Vec::new(),
+            enabled_tools: self.default_enabled_tools.clone(),
         })?;
         self.active_session = id;
         Ok(id)
+    }
+
+    fn switch_session(&mut self, id: SessionId) -> Result<SessionId, KernelError> {
+        self.store.snapshot(id)?;
+        self.active_session = id;
+        Ok(id)
+    }
+    fn delete_session(&mut self, id: SessionId) -> Result<(), KernelError> {
+        if id == self.active_session {
+            return Err(KernelError::ActiveSession);
+        }
+        self.store.delete(id).map_err(Into::into)
     }
 
     fn clear_session(&mut self) -> Result<(), KernelError> {
@@ -261,6 +285,8 @@ pub enum KernelError {
     Identifier(#[from] IdentifierError),
     #[error(transparent)]
     Inference(#[from] crate::inference::InferenceError),
+    #[error("the active session cannot be deleted")]
+    ActiveSession,
     #[error(transparent)]
     Session(#[from] SessionStoreError),
     #[error(transparent)]
@@ -339,6 +365,7 @@ mod tests {
                 model: ModelName::new("test-model").unwrap(),
             },
             default_reasoning_effort: None,
+            default_enabled_tools: Vec::new(),
         }
     }
 

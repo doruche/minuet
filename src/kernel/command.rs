@@ -4,7 +4,7 @@ use super::{ContextInfo, KernelError, ModelInfo};
 use crate::{
     agent_loop::{RunEvent, RunOutcome},
     model::ReasoningEffort,
-    session::SessionId,
+    session::{SessionId, SessionSummary},
     tool::ToolStatus,
 };
 
@@ -34,6 +34,15 @@ impl KernelHandle {
 
     pub async fn clear_session(&self) -> Result<(), KernelError> {
         self.request((), Command::ClearSession).await
+    }
+    pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, KernelError> {
+        self.request((), Command::ListSessions).await
+    }
+    pub async fn switch_session(&self, id: SessionId) -> Result<SessionId, KernelError> {
+        self.request(id, Command::SwitchSession).await
+    }
+    pub async fn delete_session(&self, id: SessionId) -> Result<(), KernelError> {
+        self.request(id, Command::DeleteSession).await
     }
 
     pub async fn model_info(&self) -> Result<ModelInfo, KernelError> {
@@ -128,6 +137,9 @@ pub(super) enum Command {
     Run(Envelope<RunRequest, RunOutcome>),
     NewSession(Envelope<(), SessionId>),
     ClearSession(Envelope<(), ()>),
+    ListSessions(Envelope<(), Vec<SessionSummary>>),
+    SwitchSession(Envelope<SessionId, SessionId>),
+    DeleteSession(Envelope<SessionId, ()>),
     ModelInfo(Envelope<(), ModelInfo>),
     SetReasoningEffort(Envelope<Option<ReasoningEffort>, ()>),
     ListTools(Envelope<(), Vec<ToolStatus>>),

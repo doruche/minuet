@@ -20,8 +20,9 @@ that each module will become a crate.
   run completion through that capability before replying.
 - `context` selects the model-visible view of committed history without a
   second writable conversation.
-- `tool` owns the compiled tool set and resolves immutable invocation snapshots
-  from session-owned tool selection. JSON is the internal heterogeneous tool
+- `tool` owns plain-text argument/result formatting and the compiled tool set,
+  and resolves immutable invocation snapshots from session-owned tool selection.
+  JSON is the internal heterogeneous tool
   value protocol; provider adapters own wire encoding.
 - `inference` defines the protocol-neutral backend capability; the
   `openai_responses` adapter owns OpenAI Responses JSON and HTTP behavior.
@@ -67,7 +68,10 @@ obligation. Tool execution observations precede the atomic batch-result commit.
 
 The TUI has one terminal input reader and restores terminal modes on normal,
 error, and interrupted exits. Live progress is presentation data, not session
-history. Live committed messages and replay share entry rendering and Markdown
-document boundaries. The final run reply does not republish model text; its
+history. Live committed messages and replay share Markdown rendering and
+document boundaries. Live tool output follows execution; replay groups stored
+call/result display snapshots at their original semantic positions without
+consulting current tools. Color and per-row indentation belong to TUI, not tool
+formatters. The final run reply does not republish model text; its
 text summary remains available to the one-shot CLI. TUI owns neither history
 mutation nor execution cancellation.

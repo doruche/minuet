@@ -47,12 +47,29 @@ are:
 
 These rules let the inline TUI show each executed result once on observation,
 and only skipped results on batch commitment, without maintaining an execution
-registry. Replay uses stored final states; it does not reconstruct live timing
-or promote streamed fragments into results. Grouping a result under a call
+registry. Live model commits publish messages only; tool labels appear at actual
+execution or committed skipping, without an advance Pending call list. Replay
+uses stored final states at their original call positions; it does not reconstruct
+live timing or promote streamed fragments into results. Grouping a result under a call
 does not imply that later messages in the same model response saw that result.
 The TUI publishes each committed model message once; the run reply supplies
 completion status, not another copy of its body. `RunOutcome.text` remains a
 lossy final-turn summary for consumers such as the one-shot CLI.
+
+Tools own explicit plain-text argument and successful-result formatting. These
+pure operations accept model-supplied JSON arguments and actual returned values
+respectively; they must not execute work, decide success or replace structured
+model input. The boundary formats ordinary errors. Runtime captures a call
+label once before invocation or skipping, then hands its display and actual
+context result to session commit. Observation uses that same display snapshot;
+replay never consults the registry. Invalid JSON and unavailable tools have
+explicit diagnostic labels and retain their ordinary execution errors. Each
+tool chooses its result display; JSON is possible but never an implicit default.
+
+The TUI owns control-character sanitization, color and layout. Tool result,
+error and streamed bodies are gray, with two-space indentation on every visual
+row including wraps and unfinished fragments. Failure headings can be red.
+NO_COLOR removes styling, not indentation. Model Markdown styling is unchanged.
 
 Observer backpressure may pause execution, but observation is not authority.
 Closing the receiver releases pending sends and does not undo or cancel work.

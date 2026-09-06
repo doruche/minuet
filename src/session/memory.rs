@@ -153,14 +153,17 @@ impl SessionRepository for MemorySessionRepository {
         let mut committed = Vec::with_capacity(results.len());
         for ((index, call_id), result) in std::mem::take(&mut s.pending).into_iter().zip(results) {
             let (output, execution) = match result {
-                ToolOutcome::Completed(output) => {
-                    (output.clone(), ToolExecution::Completed(output))
+                ToolOutcome::Completed(result) => (
+                    result.context_output,
+                    ToolExecution::Completed(result.display),
+                ),
+                ToolOutcome::Failed(result) => {
+                    (result.context_output, ToolExecution::Failed(result.display))
                 },
-                ToolOutcome::Failed(output) => (output.clone(), ToolExecution::Failed(output)),
-                ToolOutcome::Skipped {
-                    reason,
-                    context_output,
-                } => (context_output, ToolExecution::Skipped(reason)),
+                ToolOutcome::Skipped(result) => (
+                    result.context_output,
+                    ToolExecution::Skipped(result.display),
+                ),
             };
             let TranscriptEntry::ToolInvocation {
                 execution: current, ..
@@ -224,7 +227,18 @@ fn brief(items: &[ConversationItem]) -> String {
 mod tests {
     use super::*;
     use crate::inference::{ContinuationItem, ToolCall};
+    use crate::session::{ToolDisplay, ToolResult};
     use serde_json::json;
+
+    fn result(text: &str) -> ToolResult {
+        ToolResult {
+            context_output: text.into(),
+            display: ToolDisplay {
+                call: "test()".into(),
+                output: text.into(),
+            },
+        }
+    }
 
     fn model(effect: OutputEffect) -> ModelOutputItem {
         ModelOutputItem::new(ContinuationItem::for_test(json!({"opaque": true})), effect)
@@ -292,8 +306,8 @@ mod tests {
             .commit_tool_round(
                 id,
                 vec![
-                    ToolOutcome::Completed("success".into()),
-                    ToolOutcome::Failed("error with output".into()),
+                    ToolOutcome::Completed(result("success")),
+                    ToolOutcome::Failed(result("error with output")),
                 ],
             )
             .unwrap();
@@ -309,10 +323,10 @@ mod tests {
             }
         ));
         assert!(
-            matches!(&*after[2], TranscriptEntry::ToolInvocation { execution: ToolExecution::Completed(text), .. } if text == "success")
+            matches!(&*after[2], TranscriptEntry::ToolInvocation { execution: ToolExecution::Completed(display), .. } if display.output == "success")
         );
         assert!(
-            matches!(&*after[4], TranscriptEntry::ToolInvocation { execution: ToolExecution::Failed(text), .. } if text == "error with output")
+            matches!(&*after[4], TranscriptEntry::ToolInvocation { execution: ToolExecution::Failed(display), .. } if display.output == "error with output")
         );
         let context = store.snapshot(id).unwrap();
         assert_eq!(context.items.len(), 8);
@@ -344,13 +358,13 @@ mod tests {
         assert!(store.commit_tool_round(b, vec![]).is_err());
         assert!(
             store
-                .commit_tool_round(b, vec![ToolOutcome::Completed("wrong".into())])
+                .commit_tool_round(b, vec![ToolOutcome::Completed(result("wrong"))])
                 .is_err()
         );
         assert!(store.snapshot(b).unwrap().items.is_empty());
         assert_eq!(store.transcript(a).unwrap(), before);
         store
-            .commit_tool_round(a, vec![ToolOutcome::Completed("first result".into())])
+            .commit_tool_round(a, vec![ToolOutcome::Completed(result("first result"))])
             .unwrap();
         store
             .commit_inference(a, &[call("second"), call("third")], None)
@@ -359,7 +373,7 @@ mod tests {
         let count = store.snapshot(a).unwrap().items.len();
         assert!(
             store
-                .commit_tool_round(a, vec![ToolOutcome::Failed("only one".into())])
+                .commit_tool_round(a, vec![ToolOutcome::Failed(result("only one"))])
                 .is_err()
         );
         assert_eq!(store.transcript(a).unwrap(), before);
@@ -397,14 +411,17 @@ mod tests {
         store
             .commit_tool_round(
                 a,
-                vec![ToolOutcome::Skipped {
-                    reason: "limit".into(),
+                vec![ToolOutcome::Skipped(ToolResult {
+                    display: ToolDisplay {
+                        call: "new()".into(),
+                        output: "limit".into(),
+                    },
                     context_output: "encoded error".into(),
-                }],
+                })],
             )
             .unwrap();
         assert!(
-            matches!(&*store.transcript(a).unwrap()[0], TranscriptEntry::ToolInvocation {execution: ToolExecution::Skipped(reason), ..} if reason == "limit")
+            matches!(&*store.transcript(a).unwrap()[0], TranscriptEntry::ToolInvocation {execution: ToolExecution::Skipped(display), ..} if display.output == "limit")
         );
         assert!(
             matches!(&store.snapshot(a).unwrap().items[1], ConversationItem::FunctionCallOutput {output, ..} if output == "encoded error")

@@ -125,25 +125,39 @@ impl Screen {
         })
     }
 
-    pub fn fragment(&mut self, text: &str, tone: Tone) -> io::Result<()> {
+    fn styled_fragment(&mut self, text: &str, tone: Tone, indent: u16) -> io::Result<()> {
         let text = render::safe_text(text);
-        if self.tail.tone != tone && !self.tail.text.is_empty() {
+        if (self.tail.tone != tone || self.tail.indent != indent) && !self.tail.text.is_empty() {
             self.append("\n")?;
         }
         self.tail.tone = tone;
+        self.tail.indent = indent;
         self.append(&text)
     }
 
-    pub fn line(&mut self, text: &str, tone: Tone) -> io::Result<()> {
+    pub fn tool_fragment(&mut self, text: &str) -> io::Result<()> {
+        self.styled_fragment(text, Tone::Meta, CONTENT_PREFIX)
+    }
+
+    pub fn tool_body(&mut self, text: &str) -> io::Result<()> {
         self.end_line()?;
-        self.fragment(text, tone)?;
+        self.tool_fragment(text)?;
         if !text.ends_with('\n') {
-            self.fragment("\n", tone)?;
+            self.append("\n")?;
         }
         Ok(())
     }
 
-    pub fn markdown(&mut self, source: &str) -> io::Result<()> {
+    pub fn line(&mut self, text: &str, tone: Tone) -> io::Result<()> {
+        self.end_line()?;
+        self.styled_fragment(text, tone, 0)?;
+        if !text.ends_with('\n') {
+            self.append("\n")?;
+        }
+        Ok(())
+    }
+
+    fn markdown(&mut self, source: &str) -> io::Result<()> {
         self.preview.clear();
         self.end_line()?;
         self.terminal.autoresize()?;
@@ -191,7 +205,7 @@ impl Screen {
 
     fn end_line(&mut self) -> io::Result<()> {
         if !self.tail.text.is_empty() {
-            self.fragment("\n", self.tail.tone)?;
+            self.append("\n")?;
         }
         Ok(())
     }
@@ -244,9 +258,20 @@ impl Screen {
         self.publish_entries(entries)
     }
 
-    /// Live commits and replay share message/document boundaries and call
-    /// presentation. Terminal publication and viewport handoffs remain here.
-    pub fn publish_entries(&mut self, entries: &[Arc<TranscriptEntry>]) -> io::Result<()> {
+    /// Live messages retain document boundaries but calls appear only when
+    /// actually executed or explicitly skipped, not as an advance pending list.
+    pub fn publish_model_messages(&mut self, entries: &[Arc<TranscriptEntry>]) -> io::Result<()> {
+        self.preview.clear();
+        for entry in entries {
+            if let TranscriptEntry::ModelMessage { text } = entry.as_ref() {
+                self.markdown(text)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Replay consumes stored semantic order and display snapshots only.
+    fn publish_entries(&mut self, entries: &[Arc<TranscriptEntry>]) -> io::Result<()> {
         self.preview.clear();
         for entry in entries {
             match entry.as_ref() {
@@ -258,30 +283,33 @@ impl Screen {
                 // the following replay entry can overwrite this model row.
                 TranscriptEntry::ModelMessage { text } => self.markdown(text)?,
                 TranscriptEntry::ToolInvocation {
-                    name,
-                    arguments,
-                    execution,
-                } => {
-                    self.line(&format!("Tool: {name}({arguments})"), Tone::Meta)?;
-                    self.tool_execution(execution)?;
-                },
+                    name, execution, ..
+                } => self.tool_execution(name, execution)?,
             }
         }
         Ok(())
     }
 
-    pub fn tool_execution(&mut self, execution: &ToolExecution) -> io::Result<()> {
+    pub fn tool_execution(&mut self, name: &str, execution: &ToolExecution) -> io::Result<()> {
         match execution {
-            ToolExecution::Pending => self.line("No committed result", Tone::Meta),
-            ToolExecution::Completed(output) => {
-                self.line("Completed · Result:", Tone::Meta)?;
-                self.line(output, Tone::Text)
+            ToolExecution::Pending => self.line(
+                &format!("{name}: result was not committed; execution may have occurred"),
+                Tone::Error,
+            ),
+            ToolExecution::Completed(display) => {
+                self.line(&format!("Ran {}", display.call), Tone::Meta)?;
+                self.line("Result:", Tone::Meta)?;
+                self.tool_body(&display.output)
             },
-            ToolExecution::Failed(error) => {
-                self.line("Failed · Result:", Tone::Error)?;
-                self.line(error, Tone::Text)
+            ToolExecution::Failed(display) => {
+                self.line(&format!("Failed {}", display.call), Tone::Error)?;
+                self.line("Result:", Tone::Meta)?;
+                self.tool_body(&display.output)
             },
-            ToolExecution::Skipped(reason) => self.line(&format!("Skipped: {reason}"), Tone::Meta),
+            ToolExecution::Skipped(display) => {
+                self.line(&format!("Skipped {}", display.call), Tone::Meta)?;
+                self.tool_body(&display.output)
+            },
         }
     }
 
@@ -345,7 +373,9 @@ impl Screen {
         // as literal text so it survives the next request and terminal exit.
         let draft = self.preview.take();
         if !draft.is_empty() {
-            self.line(&draft, Tone::Text)?;
+            self.end_line()?;
+            self.styled_fragment(&draft, Tone::Text, CONTENT_PREFIX)?;
+            self.end_line()?;
             self.line("[response incomplete]", Tone::Error)?;
         }
         Ok(())
@@ -354,7 +384,7 @@ impl Screen {
     fn append(&mut self, text: &str) -> io::Result<()> {
         self.terminal.autoresize()?;
         let width = self.terminal.size()?.width;
-        let prefix = u16::from(self.tail.tone == Tone::Text) * CONTENT_PREFIX;
+        let prefix = self.tail.indent;
         let rows = self.tail.push(text, width.saturating_sub(prefix));
         // Bound insertion buffers even when a final result contains many lines.
         for batch in rows.chunks(128) {

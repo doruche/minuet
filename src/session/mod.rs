@@ -11,7 +11,7 @@ use crate::{
 mod memory;
 mod transcript;
 pub use memory::MemorySessionRepository;
-pub use transcript::{ToolExecution, TranscriptEntry};
+pub use transcript::{ToolDisplay, ToolExecution, TranscriptEntry};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SessionId(Uuid);
@@ -81,15 +81,17 @@ impl UsageSummary {
     }
 }
 
-/// A result produced for one committed tool invocation. The context output is
-/// kept separate from the presentation reason for skipped work.
+/// A result produced for one committed tool invocation. Presentation never
+/// determines the typed outcome or replaces the model-facing context output.
 pub enum ToolOutcome {
-    Completed(String),
-    Failed(String),
-    Skipped {
-        reason: String,
-        context_output: String,
-    },
+    Completed(ToolResult),
+    Failed(ToolResult),
+    Skipped(ToolResult),
+}
+
+pub struct ToolResult {
+    pub context_output: String,
+    pub display: ToolDisplay,
 }
 
 /// The repository's successful model-commit handoff. Entries are immutable

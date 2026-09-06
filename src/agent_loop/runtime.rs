@@ -6,7 +6,7 @@ use crate::{
     context::ContextStrategy,
     inference::{InferenceBackend, InferenceError, InferenceRequest, ToolCall},
     model::ReasoningEffort,
-    session::{SessionId, SessionStore, ToolOutcome},
+    session::{SessionId, SessionStore, ToolDisplay, ToolOutcome, ToolResult},
     tool::{ToolDefinition, ToolSnapshot, encode_error},
 };
 
@@ -151,9 +151,14 @@ impl<'a> LoopContext<'a> {
         let calls = self.take_pending()?;
         let outcomes: Vec<_> = calls
             .iter()
-            .map(|_| ToolOutcome::Skipped {
-                reason: STEP_LIMIT_OUTPUT.to_owned(),
-                context_output: encode_error("step_limit", STEP_LIMIT_OUTPUT),
+            .map(|call| {
+                ToolOutcome::Skipped(ToolResult {
+                    display: ToolDisplay {
+                        call: self.tools.display_call(&call.name, &call.arguments),
+                        output: STEP_LIMIT_OUTPUT.to_owned(),
+                    },
+                    context_output: encode_error("step_limit", STEP_LIMIT_OUTPUT),
+                })
             })
             .collect();
         let activities = calls
@@ -175,10 +180,12 @@ impl<'a> LoopContext<'a> {
         let mut outcomes = Vec::with_capacity(calls.len());
         let mut activities = Vec::with_capacity(calls.len());
         for call in calls {
+            let display_call = self.tools.display_call(&call.name, &call.arguments);
             self.events
                 .send(RunEvent::ToolStarted {
                     call_id: call.call_id.clone(),
                     name: call.name.clone(),
+                    display_call: display_call.clone(),
                 })
                 .await;
             let started = Instant::now();
@@ -189,10 +196,17 @@ impl<'a> LoopContext<'a> {
                     .await
             };
             let elapsed = started.elapsed();
+            let result = ToolResult {
+                context_output: invocation.output,
+                display: ToolDisplay {
+                    call: display_call,
+                    output: invocation.display,
+                },
+            };
             let outcome = if invocation.is_error {
-                ToolOutcome::Failed(invocation.output)
+                ToolOutcome::Failed(result)
             } else {
-                ToolOutcome::Completed(invocation.output)
+                ToolOutcome::Completed(result)
             };
             let activity = activity(&call.name, &outcome);
             self.events
@@ -214,14 +228,14 @@ impl<'a> LoopContext<'a> {
 }
 
 fn activity(name: &str, outcome: &ToolOutcome) -> ToolActivity {
-    let (output, status) = match outcome {
-        ToolOutcome::Completed(output) => (output, ToolActivityStatus::Completed),
-        ToolOutcome::Failed(output) => (output, ToolActivityStatus::Error),
-        ToolOutcome::Skipped { reason, .. } => (reason, ToolActivityStatus::Skipped),
+    let (result, status) = match outcome {
+        ToolOutcome::Completed(result) => (result, ToolActivityStatus::Completed),
+        ToolOutcome::Failed(result) => (result, ToolActivityStatus::Error),
+        ToolOutcome::Skipped(result) => (result, ToolActivityStatus::Skipped),
     };
     ToolActivity {
         name: name.to_owned(),
-        output: output.clone(),
+        display: result.display.clone(),
         status,
     }
 }
@@ -285,6 +299,13 @@ mod tests {
 
     #[async_trait]
     impl Tool for ProbeTool {
+        fn display_arguments(&self, arguments: &Value) -> String {
+            arguments.to_string()
+        }
+        fn display_result(&self, result: &Value) -> String {
+            result.to_string()
+        }
+
         fn definition(&self) -> ToolDefinition {
             ToolDefinition {
                 name: "probe".into(),
@@ -639,10 +660,10 @@ mod tests {
             };
             assert_eq!(results.len(), 2);
             assert!(
-                matches!(results[0].as_ref(), TranscriptEntry::ToolInvocation { execution: ToolExecution::Completed(output), .. } if output.contains("value"))
+                matches!(results[0].as_ref(), TranscriptEntry::ToolInvocation { execution: ToolExecution::Completed(display), .. } if display.output.contains("value"))
             );
             assert!(
-                matches!(results[1].as_ref(), TranscriptEntry::ToolInvocation { execution: ToolExecution::Completed(output), .. } if output.contains("wait"))
+                matches!(results[1].as_ref(), TranscriptEntry::ToolInvocation { execution: ToolExecution::Completed(display), .. } if display.output.contains("wait"))
             );
             assert!(
                 matches!(

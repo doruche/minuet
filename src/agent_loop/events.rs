@@ -27,6 +27,7 @@ pub enum RunEvent {
     ToolStarted {
         call_id: String,
         name: String,
+        display_call: String,
     },
     ToolOutput {
         call_id: String,

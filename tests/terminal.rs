@@ -35,6 +35,13 @@ struct GatedTool {
 
 #[async_trait]
 impl Tool for GatedTool {
+    fn display_arguments(&self, arguments: &Value) -> String {
+        arguments.get("n").map(Value::to_string).unwrap_or_default()
+    }
+    fn display_result(&self, result: &Value) -> String {
+        result["result"].as_str().unwrap().to_owned()
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "stream".into(),
@@ -733,11 +740,11 @@ fn pty_unclosed_model_code_cannot_capture_the_run_limit_notice() {
         "{contents:?}"
     );
     assert!(
-        contents.find("fn partial() {}") < contents.find("Tool: stream"),
+        contents.find("fn partial() {}") < contents.find("Skipped stream()"),
         "{contents:?}"
     );
     assert!(
-        contents.find("Tool: stream") < contents.find("run stopped:"),
+        contents.find("Skipped stream()") < contents.find("run stopped:"),
         "{contents:?}"
     );
     let row = contents
@@ -1238,7 +1245,7 @@ fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
         for text in [
             "replay-question",
             "before-tool",
-            "Tool: stream({})",
+            "stream()",
             "replay-answer",
             "中文",
         ] {
@@ -1247,9 +1254,9 @@ fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
         assert!(!replay.contains("**"), "Markdown should render: {replay}");
         assert!(
             replay.contains(if fail {
-                "Failed · Result:"
+                "Failed stream()"
             } else {
-                "Completed · Result:"
+                "Ran stream()"
             }),
             "{replay}"
         );
@@ -1261,8 +1268,8 @@ fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
             assert!(replay.contains("final-tool-result"), "{replay}");
         }
         assert!(replay.find("replay-question") < replay.find("before-tool"));
-        assert!(replay.find("before-tool") < replay.find("Tool: stream"));
-        assert!(replay.find("Tool: stream") < replay.find("replay-answer"));
+        assert!(replay.find("before-tool") < replay.find("stream()"));
+        assert!(replay.find("stream()") < replay.find("replay-answer"));
         assert!(
             !replay.contains("row-49"),
             "provisional tool fragments are not committed results"
@@ -1342,7 +1349,7 @@ fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
 }
 
 #[test]
-fn pty_live_and_replay_preserve_interleaving_and_independent_markdown_documents() {
+fn pty_execution_timeline_and_ordered_replay_keep_independent_markdown_documents() {
     let directory = tempfile::tempdir().unwrap();
     let message =
         |text: &str| json!({"type":"message","content":[{"type":"output_text","text":text}]});
@@ -1399,17 +1406,9 @@ fn pty_live_and_replay_preserve_interleaving_and_independent_markdown_documents(
         "first tool's live output",
     );
     let live = pty.parser.screen().contents();
-    let expected = [
-        "[cross][ref]",
-        "separate-message",
-        "Tool: stream({\"n\":1})",
-        "fn partial() {}",
-        "Tool: stream({\"n\":2})",
-        "after-fence",
-    ];
-    let assert_order = |contents: &str| {
+    let assert_order = |contents: &str, expected: &[&str]| {
         let mut previous = None;
-        for text in expected {
+        for &text in expected {
             assert_eq!(contents.matches(text).count(), 1, "{text}: {contents}");
             let position = contents.find(text).unwrap();
             if let Some(previous) = previous {
@@ -1418,7 +1417,19 @@ fn pty_live_and_replay_preserve_interleaving_and_independent_markdown_documents(
             previous = Some(position);
         }
     };
-    assert_order(&live);
+    assert_order(
+        &live,
+        &[
+            "[cross][ref]",
+            "separate-message",
+            "fn partial() {}",
+            "after-fence",
+            "Running stream(1)",
+        ],
+    );
+    assert!(!live.contains("Tool:"));
+    assert!(!live.contains("No committed result"));
+    assert!(!live.contains("stream(2)"));
     let assert_markdown = |screen: &vt100::Screen| {
         let contents = screen.contents();
         for text in ["separate-message", "after-fence"] {
@@ -1481,7 +1492,17 @@ fn pty_live_and_replay_preserve_interleaving_and_independent_markdown_documents(
         "ordered replay",
     );
     let replay = pty.parser.screen().contents();
-    assert_order(&replay);
+    assert_order(
+        &replay,
+        &[
+            "[cross][ref]",
+            "separate-message",
+            "Ran stream(1)",
+            "fn partial() {}",
+            "Ran stream(2)",
+            "after-fence",
+        ],
+    );
     assert_markdown(pty.parser.screen());
     assert!(!replay.contains("row-49"));
     assert_eq!(replay.matches("final-tool-result").count(), 2);

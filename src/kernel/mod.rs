@@ -633,6 +633,13 @@ mod tests {
 
     #[async_trait]
     impl crate::tool::Tool for StreamingTool {
+        fn display_arguments(&self, _: &serde_json::Value) -> String {
+            String::new()
+        }
+        fn display_result(&self, result: &serde_json::Value) -> String {
+            result["result"].as_str().unwrap().to_owned()
+        }
+
         fn definition(&self) -> crate::tool::ToolDefinition {
             crate::tool::ToolDefinition {
                 name: "stream".into(),
@@ -743,7 +750,7 @@ mod tests {
             RunEvent::InferenceStarted
         ));
         assert!(
-            matches!(event(&mut receiver).await, RunEvent::ToolStarted { call_id, name }
+            matches!(event(&mut receiver).await, RunEvent::ToolStarted { call_id, name, .. }
             if call_id == "stream-call" && name == "stream")
         );
         assert!(
@@ -767,7 +774,7 @@ mod tests {
                         activity.status,
                         crate::agent_loop::ToolActivityStatus::Completed
                     );
-                    assert_eq!(activity.output, r#"{"result":"final result only"}"#);
+                    assert_eq!(activity.display.output, "final result only");
                     break;
                 },
                 other => panic!("unexpected event: {other:?}"),
@@ -824,7 +831,7 @@ mod tests {
                     activity.status,
                     crate::agent_loop::ToolActivityStatus::Error
                 );
-                assert!(activity.output.contains("failed after output"));
+                assert!(activity.display.output.contains("failed after output"));
                 saw_failure = true;
             }
         }

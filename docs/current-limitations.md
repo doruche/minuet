@@ -82,11 +82,16 @@ in a replaceable preview while it is generated and published as complete
 Markdown only after the model turn commits. Failed partial output remains
 visible as an incomplete draft and is not committed.
 
-Committed model messages and tool-call requests appear in model-output order
-before tools execute. Tool returns are shown immediately; context outputs and
+Committed model messages appear before tools execute; live tool labels appear
+only at execution or explicit skipping, not as an advance pending list. Tool
+returns are shown immediately; context outputs and
 stored invocation results commit together at the end of the round. Replay
-groups final results under their requests and does not reproduce execution
+groups stored friendly call/result displays at the original request positions
+and does not reproduce execution
 timing. A pending record means no committed result, not proof of no execution.
+Tools provide plain-text formatting independently of model-facing JSON; replay
+does not rerun those formatters. Tool bodies are gray and indented on every row,
+including wrapping and partial streamed lines. NO_COLOR preserves indentation.
 
 Model previews reveal grapheme clusters in small batches, accelerating for
 larger bursts. Up to six recent wrapped rows remain visible, subject to terminal

@@ -15,6 +15,13 @@ Minuet-owned user messages, model messages, and grouped tool invocations with
 typed pending, completed, failed, or skipped execution states. Neither history
 is reconstructed from the other.
 
+Terminal tool states contain historical plain-text call/result display snapshots
+supplied with typed outcomes, separate from model-facing context output. The
+repository commits both together and never formats tools or refreshes historical
+display. Original call names and arguments remain available for inspection, not
+re-execution. Pending records have no committed display/result; replay names
+the tool and warns that execution may have occurred instead of inferring a result.
+
 User, model, and tool-round commits atomically publish their matching facts;
 rejection leaves context, transcript, and usage unchanged. Model commit returns
 the ordered entries actually committed and their confirmed immutable execution
@@ -24,7 +31,9 @@ is a protocol error. No caller reconstructs committed input from observations.
 
 Transcript message boundaries come from the backend's complete messages and
 remain unchanged in live rendering and replay. Calls occupy their model-output
-positions; grouped results do not assert execution between adjacent messages.
+positions in transcript and replay; live shows their execution timeline instead
+of a pending request list. Grouped results do not assert execution between
+adjacent messages.
 `Pending` means no committed result, not proof that execution has not occurred.
 Repository readiness checks prevent new user input or model commits while a
 previous round is unresolved. The execution obligation and publication rules

@@ -14,6 +14,20 @@ struct EchoArguments {
 
 #[async_trait]
 impl Tool for EchoTool {
+    fn display_arguments(&self, arguments: &Value) -> String {
+        match serde_json::from_value::<EchoArguments>(arguments.clone()) {
+            Ok(arguments) => format!("{:?}", arguments.text),
+            Err(_) => "invalid arguments".into(),
+        }
+    }
+
+    fn display_result(&self, result: &Value) -> String {
+        result["text"]
+            .as_str()
+            .expect("echo result contains text")
+            .to_owned()
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "echo".to_owned(),

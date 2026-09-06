@@ -70,8 +70,9 @@ pub enum ToolActivityStatus {
 
 #[derive(Clone, Debug)]
 pub struct ToolActivity {
+    /// Original tool name for observation, not routing or execution authority.
     pub name: String,
-    pub output: String,
+    pub display: crate::session::ToolDisplay,
     pub status: ToolActivityStatus,
 }
 

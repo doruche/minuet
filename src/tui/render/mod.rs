@@ -107,6 +107,7 @@ pub fn safe_text(text: &str) -> String {
 pub struct OutputTail {
     pub text: String,
     pub tone: Tone,
+    pub indent: u16,
 }
 
 impl OutputTail {
@@ -191,7 +192,7 @@ pub fn draw(
         .style(Tone::Text.style(colors)),
         areas[0],
     );
-    let prefix = u16::from(tail.tone == Tone::Text) * CONTENT_PREFIX;
+    let prefix = tail.indent;
     let output_area = ratatui::layout::Rect::new(
         areas[1].x + prefix.min(areas[1].width),
         areas[1].y,
@@ -234,7 +235,7 @@ pub fn tool_result(activity: &ToolActivity, elapsed: std::time::Duration) -> (St
     } else {
         format!(" · {:.2}s", elapsed.as_secs_f64())
     };
-    (format!("{verb} {}{duration}", activity.name), tone)
+    (format!("{verb} {}{duration}", activity.display.call), tone)
 }
 
 pub fn line(text: String, tone: Tone, colors: bool) -> Line<'static> {
@@ -259,6 +260,7 @@ mod tests {
             let tail = OutputTail {
                 text: tail_text.into(),
                 tone: Tone::Meta,
+                indent: 0,
             };
             terminal
                 .draw(|frame| {
@@ -295,6 +297,7 @@ mod tests {
         let tail = OutputTail {
             text: "partial output".into(),
             tone: Tone::Text,
+            indent: CONTENT_PREFIX,
         };
         for (seconds, time) in [
             (59, "59s"),

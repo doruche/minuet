@@ -212,21 +212,23 @@ fn progress(screen: &mut Screen, status: &mut String, event: RunEvent) -> io::Re
         RunEvent::InferenceStarted => *status = "Waiting for model…".into(),
         RunEvent::ModelTextDelta { text } => screen.model_delta(&text),
         RunEvent::ModelTurnCommitted { entries } => {
-            screen.publish_entries(&entries)?;
+            screen.publish_model_messages(&entries)?;
             *status = "Continuing…".into();
         },
-        RunEvent::ToolStarted { name, .. } => {
+        RunEvent::ToolStarted {
+            name, display_call, ..
+        } => {
             *status = format!("Running {name}…");
-            screen.line(&format!("Running {name}"), Tone::Meta)?;
+            screen.line(&format!("Running {display_call}"), Tone::Meta)?;
         },
-        RunEvent::ToolOutput { text, .. } => screen.fragment(&text, Tone::Text)?,
+        RunEvent::ToolOutput { text, .. } => screen.tool_fragment(&text)?,
         RunEvent::ToolExecutionFinished {
             activity, elapsed, ..
         } => {
             let (label, tone) = render::tool_result(&activity, elapsed);
             screen.line(&label, tone)?;
             screen.line("Result:", Tone::Meta)?;
-            screen.line(&activity.output, Tone::Text)?;
+            screen.tool_body(&activity.display.output)?;
             *status = "Continuing…".into();
         },
         RunEvent::ToolRoundCommitted { entries } => {
@@ -235,11 +237,12 @@ fn progress(screen: &mut Screen, status: &mut String, event: RunEvent) -> io::Re
             // This is publication deduplication, never transcript mutation.
             for entry in &entries {
                 if let TranscriptEntry::ToolInvocation {
+                    name,
                     execution: execution @ ToolExecution::Skipped(_),
                     ..
                 } = entry.as_ref()
                 {
-                    screen.tool_execution(execution)?;
+                    screen.tool_execution(name, execution)?;
                 }
             }
             *status = "Continuing…".into();

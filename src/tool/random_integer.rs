@@ -16,6 +16,20 @@ struct RandomIntegerArguments {
 
 #[async_trait]
 impl Tool for RandomIntegerTool {
+    fn display_arguments(&self, arguments: &Value) -> String {
+        match serde_json::from_value::<RandomIntegerArguments>(arguments.clone()) {
+            Ok(arguments) => format!("{}, {}", arguments.min, arguments.max),
+            Err(_) => "invalid arguments".into(),
+        }
+    }
+
+    fn display_result(&self, result: &Value) -> String {
+        result["value"]
+            .as_i64()
+            .expect("random result contains integer")
+            .to_string()
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "random_integer".to_owned(),

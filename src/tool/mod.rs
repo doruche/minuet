@@ -30,6 +30,16 @@ pub trait Tool: Send + Sync {
     /// once; subsequent calls are not used for routing or presentation.
     fn definition(&self) -> ToolDefinition;
 
+    /// Pure plain text inside the call's parentheses, without terminal markup.
+    /// Accept any JSON value (including invalid arguments); this is not
+    /// validation and must not execute work or decide invocation success.
+    fn display_arguments(&self, arguments: &Value) -> String;
+
+    /// Pure plain text from this invocation's actual successful result.
+    /// Never recompute a result or substitute this text into model context.
+    /// Must handle every value returned successfully by this tool without panic.
+    fn display_result(&self, result: &Value) -> String;
+
     async fn invoke(&self, arguments: Value, output: &dyn ToolOutput) -> Result<Value, ToolError>;
 }
 
@@ -44,6 +54,8 @@ pub struct ToolStatus {
 pub struct ToolInvocation {
     /// JSON protocol text committed to model history by the loop.
     pub output: String,
+    /// Plain text from the successful-result formatter or boundary error.
+    pub display: String,
     /// Tool-boundary execution classification, used to create the typed session
     /// outcome and its observations. The encoded output is model-facing text;
     /// consumers must not decode it to rediscover execution status.
@@ -169,25 +181,25 @@ impl ToolRegistry {
         let Some(registered) = self.tools.get(name) else {
             return invocation_error("unknown_tool", format!("unknown tool `{name}`"));
         };
-        let arguments = match serde_json::from_str(arguments) {
-            Ok(arguments) => arguments,
-            Err(error) => {
-                return invocation_error("invalid_arguments", error.to_string());
-            },
-        };
-        match registered.tool.invoke(arguments, output).await {
-            Ok(value) => ToolInvocation {
-                output: encode_result(&value),
-                is_error: false,
-            },
-            Err(error) => invocation_error(error.kind(), error.to_string()),
-        }
+        invoke_tool(registered.tool.as_ref(), arguments, output).await
     }
 }
 
 impl ToolSnapshot {
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|t| t.definition.clone()).collect()
+    }
+
+    /// Capture once before execution or skipping. Unavailable tools and malformed
+    /// JSON have explicit diagnostic labels, not a guessed JSON presentation.
+    pub fn display_call(&self, name: &str, arguments: &str) -> String {
+        let Some(registered) = self.tools.get(name) else {
+            return format!("{name}(tool unavailable)");
+        };
+        match serde_json::from_str(arguments) {
+            Ok(arguments) => format!("{name}({})", registered.tool.display_arguments(&arguments)),
+            Err(_) => format!("{name}(invalid JSON arguments)"),
+        }
     }
     pub async fn invoke(
         &self,
@@ -198,17 +210,22 @@ impl ToolSnapshot {
         let Some(registered) = self.tools.get(name) else {
             return invocation_error("disabled_tool", format!("tool `{name}` is disabled"));
         };
-        let arguments = match serde_json::from_str(arguments) {
-            Ok(arguments) => arguments,
-            Err(error) => return invocation_error("invalid_arguments", error.to_string()),
-        };
-        match registered.tool.invoke(arguments, output).await {
-            Ok(value) => ToolInvocation {
-                output: encode_result(&value),
-                is_error: false,
-            },
-            Err(error) => invocation_error(error.kind(), error.to_string()),
-        }
+        invoke_tool(registered.tool.as_ref(), arguments, output).await
+    }
+}
+
+async fn invoke_tool(tool: &dyn Tool, arguments: &str, output: &dyn ToolOutput) -> ToolInvocation {
+    let arguments = match serde_json::from_str(arguments) {
+        Ok(arguments) => arguments,
+        Err(error) => return invocation_error("invalid_arguments", error.to_string()),
+    };
+    match tool.invoke(arguments, output).await {
+        Ok(value) => ToolInvocation {
+            output: encode_result(&value),
+            display: tool.display_result(&value),
+            is_error: false,
+        },
+        Err(error) => invocation_error(error.kind(), error.to_string()),
     }
 }
 
@@ -237,7 +254,8 @@ fn validate_definition(definition: &ToolDefinition) -> Result<(), ToolRegistryEr
 
 fn invocation_error(kind: &str, message: String) -> ToolInvocation {
     ToolInvocation {
-        output: encode_error(kind, message),
+        output: encode_error(kind, &message),
+        display: message,
         is_error: true,
     }
 }
@@ -320,6 +338,13 @@ mod tests {
         struct SnapshotTool;
         #[async_trait]
         impl Tool for SnapshotTool {
+            fn display_arguments(&self, _: &Value) -> String {
+                String::new()
+            }
+            fn display_result(&self, result: &Value) -> String {
+                result.to_string()
+            }
+
             fn definition(&self) -> ToolDefinition {
                 ToolDefinition {
                     name: "snapshot".into(),

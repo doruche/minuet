@@ -213,11 +213,13 @@ impl KernelTask {
         events: Option<mpsc::Sender<RunEvent>>,
     ) -> Result<RunOutcome, KernelError> {
         let agent_loop = Arc::clone(&self.agent_loop);
+        let session = self.store.snapshot(self.active_session)?;
+        let tool_snapshot = self.tools.snapshot(&session.config.enabled_tools)?;
         let mut context = LoopContext::new(
             self.backend.as_ref(),
             self.context.as_ref(),
             self.store.as_mut(),
-            &self.tools,
+            &tool_snapshot,
             self.active_session,
             self.model.model.as_str(),
             prompt,

@@ -10,7 +10,7 @@ use crate::{
     },
     model::ReasoningEffort,
     session::{SessionId, SessionStore},
-    tool::{ToolDefinition, ToolRegistry, encode_error},
+    tool::{ToolDefinition, ToolSnapshot, encode_error},
 };
 
 use super::{CommittedModelTurn, CommittedToolRound, LoopError, ToolActivity};
@@ -27,7 +27,7 @@ pub struct LoopContext<'a> {
     backend: &'a dyn InferenceBackend,
     context: &'a dyn ContextStrategy,
     store: &'a mut dyn SessionStore,
-    tools: &'a ToolRegistry,
+    tools: &'a ToolSnapshot,
     session_id: SessionId,
     model: &'a str,
     // This is a derived, run-scoped view of store-owned history. LoopContext is
@@ -50,7 +50,7 @@ impl<'a> LoopContext<'a> {
         backend: &'a dyn InferenceBackend,
         context: &'a dyn ContextStrategy,
         store: &'a mut dyn SessionStore,
-        tools: &'a ToolRegistry,
+        tools: &'a ToolSnapshot,
         session_id: SessionId,
         model: &'a str,
         prompt: String,

@@ -53,6 +53,17 @@ pub struct ToolRegistry {
     tools: BTreeMap<String, RegisteredTool>,
 }
 
+/// A turn-scoped view of the registry. Definitions and invocation use the
+/// same selected set, so a turn cannot observe one policy and execute another.
+pub struct ToolSnapshot {
+    tools: BTreeMap<String, RegisteredToolRef>,
+}
+
+struct RegisteredToolRef {
+    tool: Arc<dyn Tool>,
+    definition: ToolDefinition,
+}
+
 struct RegisteredTool {
     tool: Arc<dyn Tool>,
     definition: ToolDefinition,
@@ -104,6 +115,24 @@ impl ToolRegistry {
             .collect()
     }
 
+    pub fn snapshot(&self, enabled: &[String]) -> Result<ToolSnapshot, ToolRegistryError> {
+        let mut tools = BTreeMap::new();
+        for name in enabled {
+            let registered = self
+                .tools
+                .get(name)
+                .ok_or_else(|| ToolRegistryError::Unknown(name.clone()))?;
+            tools.insert(
+                name.clone(),
+                RegisteredToolRef {
+                    tool: Arc::clone(&registered.tool),
+                    definition: registered.definition.clone(),
+                },
+            );
+        }
+        Ok(ToolSnapshot { tools })
+    }
+
     pub fn list(&self) -> Vec<ToolStatus> {
         self.tools
             .values()
@@ -141,6 +170,33 @@ impl ToolRegistry {
             Err(error) => {
                 return invocation_error("invalid_arguments", error.to_string());
             },
+        };
+        match registered.tool.invoke(arguments, output).await {
+            Ok(value) => ToolInvocation {
+                output: encode_result(&value),
+                is_error: false,
+            },
+            Err(error) => invocation_error(error.kind(), error.to_string()),
+        }
+    }
+}
+
+impl ToolSnapshot {
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
+        self.tools.values().map(|t| t.definition.clone()).collect()
+    }
+    pub async fn invoke(
+        &self,
+        name: &str,
+        arguments: &str,
+        output: &dyn ToolOutput,
+    ) -> ToolInvocation {
+        let Some(registered) = self.tools.get(name) else {
+            return invocation_error("disabled_tool", format!("tool `{name}` is disabled"));
+        };
+        let arguments = match serde_json::from_str(arguments) {
+            Ok(arguments) => arguments,
+            Err(error) => return invocation_error("invalid_arguments", error.to_string()),
         };
         match registered.tool.invoke(arguments, output).await {
             Ok(value) => ToolInvocation {

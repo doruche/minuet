@@ -67,7 +67,6 @@ struct RegisteredToolRef {
 struct RegisteredTool {
     tool: Arc<dyn Tool>,
     definition: ToolDefinition,
-    enabled: bool,
 }
 
 impl ToolRegistry {
@@ -88,21 +87,16 @@ impl ToolRegistry {
             let name = definition.name.clone();
             if registry
                 .tools
-                .insert(
-                    name.clone(),
-                    RegisteredTool {
-                        tool,
-                        definition,
-                        enabled: false,
-                    },
-                )
+                .insert(name.clone(), RegisteredTool { tool, definition })
                 .is_some()
             {
                 return Err(ToolRegistryError::Duplicate(name));
             }
         }
         for name in enabled {
-            registry.set_enabled(name, true)?;
+            if !registry.tools.contains_key(name) {
+                return Err(ToolRegistryError::Unknown(name.clone()));
+            }
         }
         Ok(registry)
     }
@@ -110,7 +104,6 @@ impl ToolRegistry {
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .values()
-            .filter(|registered| registered.enabled)
             .map(|registered| registered.definition.clone())
             .collect()
     }
@@ -153,18 +146,17 @@ impl ToolRegistry {
             .map(|registered| ToolStatus {
                 name: registered.definition.name.clone(),
                 description: registered.definition.description.clone(),
-                enabled: registered.enabled,
+                enabled: true,
             })
             .collect()
     }
 
-    pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<(), ToolRegistryError> {
-        let registered = self
-            .tools
-            .get_mut(name)
-            .ok_or_else(|| ToolRegistryError::Unknown(name.to_owned()))?;
-        registered.enabled = enabled;
-        Ok(())
+    pub fn set_enabled(&mut self, name: &str, _enabled: bool) -> Result<(), ToolRegistryError> {
+        if self.tools.contains_key(name) {
+            Ok(())
+        } else {
+            Err(ToolRegistryError::Unknown(name.to_owned()))
+        }
     }
 
     pub async fn invoke(
@@ -176,9 +168,6 @@ impl ToolRegistry {
         let Some(registered) = self.tools.get(name) else {
             return invocation_error("unknown_tool", format!("unknown tool `{name}`"));
         };
-        if !registered.enabled {
-            return invocation_error("disabled_tool", format!("tool `{name}` is disabled"));
-        }
         let arguments = match serde_json::from_str(arguments) {
             Ok(arguments) => arguments,
             Err(error) => {
@@ -303,10 +292,11 @@ mod tests {
     #[tokio::test]
     async fn exposes_only_enabled_tools() {
         let registry = ToolRegistry::with_builtins(&enabled(&["echo"])).unwrap();
-        assert_eq!(registry.definitions().len(), 1);
-        assert_eq!(registry.definitions()[0].name, "echo");
+        let snapshot = registry.snapshot(&["echo".into()]).unwrap();
+        assert_eq!(snapshot.definitions().len(), 1);
+        assert_eq!(snapshot.definitions()[0].name, "echo");
 
-        let disabled = registry
+        let disabled = snapshot
             .invoke("random_integer", r#"{"min":1,"max":1}"#, &())
             .await;
         assert!(disabled.is_error);

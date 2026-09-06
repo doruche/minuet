@@ -118,6 +118,9 @@ impl KernelTask {
                 Command::ClearSession(Envelope { reply, .. }) => {
                     let _ = reply.send(self.clear_session());
                 },
+                Command::ActiveSession(Envelope { reply, .. }) => {
+                    let _ = reply.send(Ok(self.active_session));
+                },
                 Command::ListSessions(Envelope { reply, .. }) => {
                     let _ = reply.send(Ok(self.store.list()));
                 },
@@ -138,16 +141,18 @@ impl KernelTask {
                     let _ = reply.send(result);
                 },
                 Command::ListTools(Envelope { reply, .. }) => {
-                    let _ = reply.send(Ok(self.tools.list()));
+                    let result = self
+                        .store
+                        .snapshot(self.active_session)
+                        .map(|s| self.tools.list_for(&s.config.enabled_tools))
+                        .map_err(Into::into);
+                    let _ = reply.send(result);
                 },
                 Command::SetToolEnabled(Envelope {
                     payload: change,
                     reply,
                 }) => {
-                    let result = self
-                        .tools
-                        .set_enabled(&change.name, change.enabled)
-                        .map_err(Into::into);
+                    let result = self.set_tool_enabled(&change.name, change.enabled);
                     let _ = reply.send(result);
                 },
                 Command::ContextInfo(Envelope { reply, .. }) => {
@@ -162,6 +167,20 @@ impl KernelTask {
                 },
             }
         }
+    }
+
+    fn set_tool_enabled(&mut self, name: &str, enabled: bool) -> Result<(), KernelError> {
+        let mut config = self.store.snapshot(self.active_session)?.config;
+        if !self.tools.list().iter().any(|t| t.name == name) {
+            return Err(ToolRegistryError::Unknown(name.to_owned()).into());
+        }
+        config.enabled_tools.retain(|n| n != name);
+        if enabled {
+            config.enabled_tools.push(name.to_owned());
+        }
+        self.store
+            .set_config(self.active_session, config)
+            .map_err(Into::into)
     }
 
     fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) -> Result<(), KernelError> {
@@ -287,6 +306,8 @@ pub enum KernelError {
     Inference(#[from] crate::inference::InferenceError),
     #[error("the active session cannot be deleted")]
     ActiveSession,
+    #[error(transparent)]
+    SessionId(#[from] crate::session::SessionIdError),
     #[error(transparent)]
     Session(#[from] SessionStoreError),
     #[error(transparent)]

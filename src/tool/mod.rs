@@ -141,6 +141,19 @@ impl ToolRegistry {
         Ok(ToolSnapshot { tools })
     }
 
+    pub fn list_for(&self, enabled: &[String]) -> Vec<ToolStatus> {
+        self.tools
+            .values()
+            .map(|registered| ToolStatus {
+                name: registered.definition.name.clone(),
+                description: registered.definition.description.clone(),
+                enabled: enabled
+                    .iter()
+                    .any(|name| name == &registered.definition.name),
+            })
+            .collect()
+    }
+
     pub fn list(&self) -> Vec<ToolStatus> {
         self.tools
             .values()

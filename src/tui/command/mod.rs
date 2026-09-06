@@ -25,12 +25,9 @@ pub enum Command {
     /// Exit Minuet through shutdown
     #[command(name = "/exit", visible_alias = "/quit")]
     Exit,
-    /// Start a new in-memory session
-    #[command(name = "/new")]
-    New,
-    /// Clear the active session's conversation history
-    #[command(name = "/clear")]
-    Clear,
+    /// Manage sessions
+    #[command(name = "/session", subcommand)]
+    Session(session::Command),
     /// Inspect and configure the active model
     #[command(name = "/model", subcommand)]
     Model(model::Command),
@@ -48,8 +45,7 @@ impl Command {
             Self::Model(command) => command.execute(kernel).await,
             Self::Tools(command) => command.execute(kernel).await,
             Self::Context(command) => command.execute(kernel).await,
-            Self::New => session::new(kernel).await,
-            Self::Clear => session::clear(kernel).await,
+            Self::Session(command) => command.execute(kernel).await,
             Self::Exit | Self::Help => unreachable!("handled by the interaction/parser boundary"),
         }
     }

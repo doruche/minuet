@@ -35,6 +35,9 @@ impl KernelHandle {
     pub async fn clear_session(&self) -> Result<(), KernelError> {
         self.request((), Command::ClearSession).await
     }
+    pub async fn active_session(&self) -> Result<SessionId, KernelError> {
+        self.request((), Command::ActiveSession).await
+    }
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, KernelError> {
         self.request((), Command::ListSessions).await
     }
@@ -137,6 +140,7 @@ pub(super) enum Command {
     Run(Envelope<RunRequest, RunOutcome>),
     NewSession(Envelope<(), SessionId>),
     ClearSession(Envelope<(), ()>),
+    ActiveSession(Envelope<(), SessionId>),
     ListSessions(Envelope<(), Vec<SessionSummary>>),
     SwitchSession(Envelope<SessionId, SessionId>),
     DeleteSession(Envelope<SessionId, ()>),

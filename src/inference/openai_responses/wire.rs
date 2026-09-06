@@ -104,13 +104,12 @@ pub(super) fn parse_response(
     let raw_output = value.get("output").and_then(Value::as_array).ok_or(
         OpenAiResponsesBackendError::MalformedResponse("missing output array"),
     )?;
-    let mut item_ids = std::collections::HashSet::new();
     let mut call_ids = std::collections::HashSet::new();
     let output = raw_output
         .iter()
         .cloned()
         .map(|item| {
-            validate_unique_identities(&item, &mut item_ids, &mut call_ids)?;
+            validate_unique_identities(&item, &mut call_ids)?;
             parse_output_item(item)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -125,16 +124,8 @@ pub(super) fn parse_response(
 
 fn validate_unique_identities(
     value: &Value,
-    item_ids: &mut std::collections::HashSet<String>,
     call_ids: &mut std::collections::HashSet<String>,
 ) -> Result<(), OpenAiResponsesBackendError> {
-    if let Some(id) = value.get("id").and_then(Value::as_str)
-        && !item_ids.insert(id.to_owned())
-    {
-        return Err(OpenAiResponsesBackendError::MalformedResponse(
-            "duplicate output item identity",
-        ));
-    }
     if value.get("type").and_then(Value::as_str) == Some("function_call") {
         let id = required_string(value, "call_id")?;
         if !call_ids.insert(id.to_owned()) {
@@ -338,6 +329,25 @@ mod tests {
         });
 
         assert_eq!(parse_response(response).unwrap().usage, None);
+    }
+
+    #[test]
+    fn allows_reused_non_behavioral_item_ids() {
+        let response = json!({
+            "status": "completed",
+            "output": [
+                {"type":"message","id":"same","content":[]},
+                {"type":"reasoning","id":"same"}
+            ]
+        });
+        assert!(parse_response(response).is_ok());
+    }
+
+    #[test]
+    fn rejects_reused_function_call_ids() {
+        let call = json!({"type":"function_call","call_id":"same","name":"x","arguments":"{}"});
+        let response = json!({"status":"completed","output":[call.clone(), call]});
+        assert!(parse_response(response).is_err());
     }
 
     #[test]

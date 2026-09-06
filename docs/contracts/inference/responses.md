@@ -7,11 +7,13 @@ successful `response.completed` event and commits it before exposing any tool
 calls.
 
 The terminal response's complete `output` array is authoritative when present.
-If it is explicitly empty, the adapter may reconstruct the result from a
-contiguous, complete set of `response.output_item.done` items observed in the
-same stream. Text deltas and individual item completion are provisional and
-cannot establish success or replace missing finalized output. Missing,
-conflicting, duplicate, incomplete, or unmatched output evidence is an error.
+Provisional deltas and item events may be incomplete or serialized differently
+and cannot override a parseable terminal result. If terminal `output` is
+explicitly empty, the adapter may reconstruct the result from a contiguous,
+complete set of `response.output_item.done` items observed in the same stream.
+Missing or ambiguous evidence is an error only when it prevents that
+reconstruction. Final function-call identities remain unique because they
+drive tool execution; ordinary item IDs are association and diagnostic data.
 
 Opaque continuation data remains intact for replay. Usage comes from the
 validated terminal response and is recorded once with the committed result;

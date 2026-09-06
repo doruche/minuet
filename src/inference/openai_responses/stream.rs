@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::Value;
 
@@ -12,20 +12,11 @@ const MAX_PARTS: usize = 4096;
 #[derive(Default)]
 pub(super) struct ResponseStream {
     items: BTreeMap<u64, Value>,
-    started: HashMap<u64, StartedItem>,
-    ids: HashMap<String, u64>,
-    call_ids: HashMap<String, u64>,
+    started: HashSet<u64>,
     retained_bytes: usize,
     terminal: Option<Value>,
     unindexed_activity: bool,
     part_count: usize,
-}
-
-#[derive(Default)]
-struct StartedItem {
-    id: Option<String>,
-    kind: Option<String>,
-    call_id: Option<String>,
 }
 
 impl ResponseStream {
@@ -55,6 +46,7 @@ impl ResponseStream {
             },
             "response.function_call_arguments.delta"
             | "response.reasoning_summary_text.delta"
+            | "response.reasoning_text.delta"
             | "response.reasoning_content.delta" => {
                 let kind = if event_type.starts_with("response.function_call") {
                     "function_call"
@@ -118,63 +110,8 @@ impl ResponseStream {
         if index > (MAX_ITEMS as u64 - 1) {
             return Err(Error::ResourceLimit("output index exceeds limit"));
         }
-        let entry = self.started.entry(index).or_default();
-        let kind = item.get("type").and_then(Value::as_str).map(str::to_owned);
-        if let (Some(old), Some(new)) = (&entry.kind, &kind)
-            && old != new
-        {
-            return Err(Error::OutputIntegrity {
-                index: Some(index as usize),
-                detail: "output item type changed",
-            });
-        }
-        if let Some(id) = item.get("id").and_then(Value::as_str) {
-            if let Some(old) = &entry.id
-                && old != id
-            {
-                return Err(Error::OutputIntegrity {
-                    index: Some(index as usize),
-                    detail: "output item identity changed",
-                });
-            }
-            if let Some(old_index) = self.ids.insert(id.to_owned(), index)
-                && old_index != index
-            {
-                return Err(Error::OutputIntegrity {
-                    index: Some(index as usize),
-                    detail: "output item identity reused",
-                });
-            }
-            entry.id = Some(id.to_owned());
-        }
-        if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
-            if let Some(old) = &entry.call_id
-                && old != call_id
-            {
-                return Err(Error::OutputIntegrity {
-                    index: Some(index as usize),
-                    detail: "call identity changed",
-                });
-            }
-            if let Some(old_index) = self.call_ids.insert(call_id.to_owned(), index)
-                && old_index != index
-            {
-                return Err(Error::OutputIntegrity {
-                    index: Some(index as usize),
-                    detail: "call identity reused",
-                });
-            }
-            entry.call_id = Some(call_id.to_owned());
-        }
-        entry.kind = kind;
-        if !done {
-            if item.get("status").and_then(Value::as_str) == Some("completed") {
-                return Err(Error::OutputIntegrity {
-                    index: Some(index as usize),
-                    detail: "added item already completed",
-                });
-            }
-        } else {
+        self.started.insert(index);
+        if done {
             wire::validate_output_item(item)?;
         }
         Ok(())
@@ -218,7 +155,7 @@ impl ResponseStream {
             }
             if self
                 .started
-                .keys()
+                .iter()
                 .any(|index| !self.items.contains_key(index))
             {
                 return Err(Error::OutputIntegrity {
@@ -235,33 +172,11 @@ impl ResponseStream {
         if terminal_bytes > MAX_ITEM_BYTES {
             return Err(Error::ResourceLimit("terminal output exceeded size limit"));
         }
-        for (index, item) in output.iter().enumerate() {
+        for item in output {
             wire::validate_output_item(item)?;
-            if let Some(done) = self.items.get(&(index as u64)) {
-                reconcile(done, item, index)?;
-            }
-        }
-        if self.items.len() > output.len() {
-            return Err(Error::OutputIntegrity {
-                index: None,
-                detail: "terminal output omitted finalized items",
-            });
-        }
-        if self.started.len() > self.items.len() {
-            return Err(Error::OutputIntegrity {
-                index: None,
-                detail: "started output item was not finalized",
-            });
-        }
-        if self
-            .items
-            .keys()
-            .any(|index| *index as usize >= output.len())
-        {
-            return Err(Error::OutputIntegrity {
-                index: None,
-                detail: "terminal output indexes do not match finalized items",
-            });
+            // The completed response is the authoritative representation. A
+            // provider may serialize the same item differently in provisional
+            // done events (for example null versus an empty annotations list).
         }
         Ok(())
     }
@@ -295,37 +210,6 @@ fn index(value: &Value) -> Result<u64, Error> {
         .ok_or(Error::MalformedResponse("output_index"))
 }
 
-fn reconcile(done: &Value, terminal: &Value, index: usize) -> Result<(), Error> {
-    let fields = [
-        "type",
-        "id",
-        "role",
-        "name",
-        "call_id",
-        "arguments",
-        "content",
-        "summary",
-        "encrypted_content",
-    ];
-    for field in fields {
-        let a = done.get(field);
-        let b = terminal.get(field);
-        if field == "encrypted_content"
-            && a.and_then(Value::as_str).is_none()
-            && b.and_then(Value::as_str).is_some()
-        {
-            continue;
-        }
-        if a != b && !(field == "role" && a.is_none()) {
-            return Err(Error::OutputIntegrity {
-                index: Some(index),
-                detail: "finalized and terminal output conflict",
-            });
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,11 +236,30 @@ mod tests {
         assert!(matches!(r.output[0].effect(), crate::inference::OutputEffect::Text(t) if t=="OK"));
     }
     #[test]
-    fn rejects_conflicting_terminal_item() {
+    fn terminal_item_is_authoritative() {
         let item = message("OK");
         let mut other = message("NO");
         other["id"] = json!("m");
-        assert!(stream(vec![json!({"type":"response.output_item.done","output_index":0,"item":item}),json!({"type":"response.completed","response":{"status":"completed","output":[other]}})]).is_err());
+        let result = stream(vec![
+            json!({"type":"response.output_item.done","output_index":0,"item":item}),
+            json!({"type":"response.completed","response":{"status":"completed","output":[other]}}),
+        ])
+        .unwrap();
+        assert!(
+            matches!(result.output[0].effect(), crate::inference::OutputEffect::Text(t) if t == "NO")
+        );
+    }
+
+    #[test]
+    fn complete_terminal_output_survives_unfinished_preview() {
+        let item = message("OK");
+        let result = stream(vec![
+            json!({"type":"response.output_item.added","output_index":3,"item":{"type":"message","status":"in_progress"}}),
+            json!({"type":"response.completed","response":{"status":"completed","output":[item]}}),
+        ]).unwrap();
+        assert!(
+            matches!(result.output[0].effect(), crate::inference::OutputEffect::Text(t) if t == "OK")
+        );
     }
     #[test]
     fn rejects_events_after_terminal() {

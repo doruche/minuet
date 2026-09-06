@@ -4,8 +4,11 @@ mod preview;
 
 use backend::InlineBackend;
 
-use std::io::{self, Write};
 use std::time::Instant;
+use std::{
+    io::{self, Write},
+    sync::Arc,
+};
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -16,8 +19,8 @@ use crossterm::{
     execute,
     style::{Attribute, Print, ResetColor, SetAttribute},
     terminal::{
-        BeginSynchronizedUpdate, EndSynchronizedUpdate, disable_raw_mode, enable_raw_mode,
-        supports_keyboard_enhancement,
+        BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate, disable_raw_mode,
+        enable_raw_mode, supports_keyboard_enhancement,
     },
 };
 use preview::Preview;
@@ -30,6 +33,7 @@ use super::{
     input::Input,
     render::{self, CONTENT_PREFIX, OutputTail, Tone},
 };
+use minuet::session::{ToolExecution, TranscriptEntry};
 
 pub struct Screen {
     terminal: Terminal<InlineBackend>,
@@ -212,6 +216,64 @@ impl Screen {
 
     pub fn restore_modes(&mut self) -> io::Result<()> {
         self.mode.restore()
+    }
+
+    /// Replace the current inline view with the selected session's semantic
+    /// transcript. Replay only publishes stored text; it never invokes work.
+    pub fn replay(&mut self, entries: &[Arc<TranscriptEntry>]) -> io::Result<()> {
+        self.preview.clear();
+        self.tail = OutputTail::default();
+        let area = self.terminal.get_frame().area();
+        // Inline viewports normally preserve terminal scrollback. A session
+        // replacement must withdraw that publication too, otherwise old
+        // messages remain visible above the new transcript. ED3 is supported
+        // by terminals that implement native scrollback erasure; it is sent
+        // explicitly alongside ED2 and a cursor home. Errors stay observable.
+        execute!(
+            self.terminal.backend_mut(),
+            Clear(ClearType::All),
+            Clear(ClearType::Purge),
+            MoveTo(0, 0)
+        )?;
+        self.terminal = Terminal::with_options(
+            InlineBackend::new(),
+            TerminalOptions {
+                viewport: Viewport::Inline(area.height),
+            },
+        )?;
+        for entry in entries {
+            match entry.as_ref() {
+                TranscriptEntry::UserMessage { text } => {
+                    self.line(&format!("> {text}"), Tone::User)?
+                },
+                // The normal Markdown publication path also withdraws and
+                // reanchors Ratatui's inline viewport. Without that handoff,
+                // the following replay entry can overwrite this model row.
+                TranscriptEntry::ModelMessage { text } => self.markdown(text)?,
+                TranscriptEntry::ToolInvocation {
+                    name,
+                    arguments,
+                    execution,
+                } => {
+                    self.line(&format!("Tool: {name}({arguments})"), Tone::Meta)?;
+                    match execution {
+                        ToolExecution::Pending => self.line("No committed result", Tone::Meta)?,
+                        ToolExecution::Completed(output) => {
+                            self.line("Completed · Result:", Tone::Meta)?;
+                            self.line(output, Tone::Text)?;
+                        },
+                        ToolExecution::Failed(error) => {
+                            self.line("Failed · Result:", Tone::Error)?;
+                            self.line(error, Tone::Text)?;
+                        },
+                        ToolExecution::Skipped(reason) => {
+                            self.line(&format!("Skipped: {reason}"), Tone::Meta)?
+                        },
+                    }
+                },
+            }
+        }
+        Ok(())
     }
 
     fn draw_frame(&mut self, input: &Input, status: Option<render::Status<'_>>) -> io::Result<()> {

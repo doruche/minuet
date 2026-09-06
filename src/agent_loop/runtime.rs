@@ -6,10 +6,9 @@ use crate::{
     context::ContextStrategy,
     inference::{
         ConversationItem, InferenceBackend, InferenceError, InferenceRequest, OutputEffect,
-        ToolCall,
     },
     model::ReasoningEffort,
-    session::{SessionId, SessionStore},
+    session::{SessionId, SessionStore, ToolOutcome},
     tool::{ToolDefinition, ToolSnapshot, encode_error},
 };
 
@@ -61,13 +60,12 @@ impl<'a> LoopContext<'a> {
         }
 
         let snapshot = store.snapshot(session_id)?;
-        let user_item = ConversationItem::UserText(prompt);
         // Locally accepting user input commits it before network work. A failed
         // upstream call therefore leaves an observable unanswered user turn
         // instead of silently discarding input or guessing whether it ran.
-        store.append(session_id, std::slice::from_ref(&user_item))?;
+        store.commit_user(session_id, &prompt)?;
         let mut input = snapshot.items;
-        input.push(user_item);
+        input.push(ConversationItem::UserText(prompt));
         let definitions = tools.definitions();
 
         Ok(Self {
@@ -104,19 +102,21 @@ impl<'a> LoopContext<'a> {
         let mut output_items = Vec::with_capacity(response.output.len());
         let mut tool_calls = Vec::new();
         let mut text = String::new();
-        for item in response.output {
+        for item in &response.output {
             match item.effect() {
                 OutputEffect::None => {},
                 OutputEffect::Text(fragment) => text.push_str(fragment),
                 OutputEffect::ToolCall(call) => tool_calls.push(call.clone()),
             }
-            output_items.push(ConversationItem::Continuation(item.into_continuation()));
+            output_items.push(ConversationItem::Continuation(
+                item.clone().into_continuation(),
+            ));
         }
 
         // Receipt of a model response is the commit point. From here on it
         // remains in history even if a later tool round or request fails.
         self.store
-            .commit_inference(self.session_id, &output_items, usage)?;
+            .commit_inference(self.session_id, &response.output, usage)?;
         self.input.extend(output_items);
         self.events
             .send(RunEvent::ModelTurnCommitted {
@@ -135,7 +135,7 @@ impl<'a> LoopContext<'a> {
         &mut self,
         pending: PendingToolRound,
     ) -> Result<CommittedToolRound, LoopError> {
-        self.commit_tool_calls(pending.calls).await
+        self.commit_tool_calls(pending).await
     }
 
     pub async fn skip_and_commit(
@@ -160,7 +160,16 @@ impl<'a> LoopContext<'a> {
                 status: ToolActivityStatus::Skipped,
             });
         }
-        self.store.append(self.session_id, &results)?;
+        self.store.commit_tool_round(
+            self.session_id,
+            results
+                .iter()
+                .map(|_| ToolOutcome::Skipped {
+                    reason: STEP_LIMIT_OUTPUT.to_owned(),
+                    context_output: encode_error("step_limit", STEP_LIMIT_OUTPUT),
+                })
+                .collect(),
+        )?;
         self.input.extend(results);
         for (call_id, activity) in call_ids.into_iter().zip(&activities) {
             self.events
@@ -176,11 +185,11 @@ impl<'a> LoopContext<'a> {
 
     async fn commit_tool_calls(
         &mut self,
-        tool_calls: Vec<ToolCall>,
+        pending: PendingToolRound,
     ) -> Result<CommittedToolRound, LoopError> {
-        let mut results = Vec::with_capacity(tool_calls.len());
-        let mut activities = Vec::with_capacity(tool_calls.len());
-        for call in tool_calls {
+        let mut results = Vec::with_capacity(pending.calls.len());
+        let mut activities = Vec::with_capacity(pending.calls.len());
+        for call in pending.calls {
             self.events
                 .send(RunEvent::ToolStarted {
                     call_id: call.call_id.clone(),
@@ -217,7 +226,17 @@ impl<'a> LoopContext<'a> {
                 .await;
             activities.push(activity);
         }
-        self.store.append(self.session_id, &results)?;
+        let outcomes = activities
+            .iter()
+            .map(|a| {
+                if a.status == ToolActivityStatus::Error {
+                    ToolOutcome::Failed(a.output.clone())
+                } else {
+                    ToolOutcome::Completed(a.output.clone())
+                }
+            })
+            .collect();
+        self.store.commit_tool_round(self.session_id, outcomes)?;
         self.input.extend(results);
         Ok(CommittedToolRound { activities })
     }

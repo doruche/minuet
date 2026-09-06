@@ -23,7 +23,7 @@ const PROGRESS_BUFFER: usize = 32;
 
 enum Reply {
     Run(Result<RunOutcome, KernelError>),
-    Command(Result<String, KernelError>),
+    Command(Result<command::Output, KernelError>),
 }
 
 struct Request {
@@ -195,7 +195,11 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                         screen.line(&format!("error: {error}"), Tone::Error)?;
                         screen.line(&format!("Failed · {elapsed}"), Tone::Error)?;
                     },
-                    Reply::Command(Ok(text)) => screen.line(&text, Tone::Command)?,
+                    Reply::Command(Ok(command::Output::Notice(text))) => screen.line(&text, Tone::Command)?,
+                    Reply::Command(Ok(command::Output::Session { view, notice })) => {
+                        screen.replay(&view.entries)?;
+                        screen.line(&notice, Tone::Command)?;
+                    },
                     Reply::Command(Err(error)) => screen.line(&format!("error: {error}"), Tone::Error)?,
                 }
             },

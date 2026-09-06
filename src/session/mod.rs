@@ -1,15 +1,17 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    inference::{ConversationItem, TokenUsage},
+    inference::{ConversationItem, ModelOutputItem, TokenUsage},
     model::ReasoningEffort,
 };
 
 mod memory;
+mod transcript;
 pub use memory::MemorySessionRepository;
+pub use transcript::{ToolExecution, TranscriptEntry};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SessionId(Uuid);
@@ -79,23 +81,46 @@ impl UsageSummary {
     }
 }
 
+/// A result produced for one committed tool invocation. The context output is
+/// kept separate from the presentation reason for skipped work.
+pub enum ToolOutcome {
+    Completed(String),
+    Failed(String),
+    Skipped {
+        reason: String,
+        context_output: String,
+    },
+}
+
 pub trait SessionRepository: Send {
     fn create(&mut self, config: SessionConfig) -> Result<SessionId, SessionRepositoryError>;
     fn list(&self) -> Vec<SessionSummary>;
     fn snapshot(&self, id: SessionId) -> Result<SessionSnapshot, SessionRepositoryError>;
-    fn append(
-        &mut self,
+    /// The returned entries are immutable read snapshots. Cloning this view
+    /// shares message payloads; later repository mutations do not change it.
+    fn transcript(
+        &self,
         id: SessionId,
-        items: &[ConversationItem],
-    ) -> Result<(), SessionRepositoryError>;
-    fn clear(&mut self, id: SessionId) -> Result<(), SessionRepositoryError>;
-    fn delete(&mut self, id: SessionId) -> Result<(), SessionRepositoryError>;
+    ) -> Result<Vec<Arc<TranscriptEntry>>, SessionRepositoryError>;
+    /// Accepts one user message into context and presentation history together.
+    fn commit_user(&mut self, id: SessionId, text: &str) -> Result<(), SessionRepositoryError>;
+    /// Commits the backend's semantic projections and opaque continuations with
+    /// usage in one mutation. Tool calls remain pending until their round ends.
     fn commit_inference(
         &mut self,
         id: SessionId,
-        output: &[ConversationItem],
+        output: &[ModelOutputItem],
         usage: Option<TokenUsage>,
     ) -> Result<(), SessionRepositoryError>;
+    /// Completes the one pending tool round owned by this serialized session.
+    /// Validation precedes publication of context outputs and terminal states.
+    fn commit_tool_round(
+        &mut self,
+        id: SessionId,
+        results: Vec<ToolOutcome>,
+    ) -> Result<(), SessionRepositoryError>;
+    fn clear(&mut self, id: SessionId) -> Result<(), SessionRepositoryError>;
+    fn delete(&mut self, id: SessionId) -> Result<(), SessionRepositoryError>;
     fn set_config(
         &mut self,
         id: SessionId,
@@ -115,6 +140,8 @@ pub enum SessionRepositoryError {
     NotFound(SessionId),
     #[error("session {0} already exists")]
     AlreadyExists(SessionId),
+    #[error("cannot commit tool round for session {id}: {reason}")]
+    InvalidToolRound { id: SessionId, reason: &'static str },
 }
 
 pub use SessionRepository as SessionStore;

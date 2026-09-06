@@ -8,7 +8,9 @@ use crate::{
     context::ContextStrategy,
     inference::{InferenceBackend, InferenceRequest},
     model::{IdentifierError, ModelSelection, ReasoningEffort},
-    session::{SessionConfig, SessionId, SessionStore, SessionStoreError, UsageSummary},
+    session::{
+        SessionConfig, SessionId, SessionStore, SessionStoreError, TranscriptEntry, UsageSummary,
+    },
     tool::{ToolRegistry, ToolRegistryError},
 };
 
@@ -191,19 +193,22 @@ impl KernelTask {
             .map_err(Into::into)
     }
 
-    fn new_session(&mut self) -> Result<SessionId, KernelError> {
+    fn new_session(&mut self) -> Result<SessionView, KernelError> {
         let id = self.store.create(SessionConfig {
             reasoning_effort: self.default_reasoning_effort.clone(),
             enabled_tools: self.default_enabled_tools.clone(),
         })?;
         self.active_session = id;
-        Ok(id)
+        Ok(SessionView {
+            id,
+            entries: Vec::new(),
+        })
     }
 
-    fn switch_session(&mut self, id: SessionId) -> Result<SessionId, KernelError> {
-        self.store.snapshot(id)?;
+    fn switch_session(&mut self, id: SessionId) -> Result<SessionView, KernelError> {
+        let entries = self.store.transcript(id)?;
         self.active_session = id;
-        Ok(id)
+        Ok(SessionView { id, entries })
     }
     fn delete_session(&mut self, id: SessionId) -> Result<(), KernelError> {
         if id == self.active_session {
@@ -212,8 +217,12 @@ impl KernelTask {
         self.store.delete(id).map_err(Into::into)
     }
 
-    fn clear_session(&mut self) -> Result<(), KernelError> {
-        self.store.clear(self.active_session).map_err(Into::into)
+    fn clear_session(&mut self) -> Result<SessionView, KernelError> {
+        self.store.clear(self.active_session)?;
+        Ok(SessionView {
+            id: self.active_session,
+            entries: Vec::new(),
+        })
     }
 
     fn model_info(&self) -> Result<ModelInfo, KernelError> {
@@ -271,6 +280,15 @@ impl KernelTask {
         )?;
         agent_loop.run(&mut context).await.map_err(Into::into)
     }
+}
+
+/// A presentation snapshot taken at successful activation or clear. Entries
+/// share immutable payloads with the repository; subsequent mutations may make
+/// this view stale. It grants no authority over the active session or execution.
+#[derive(Clone, Debug)]
+pub struct SessionView {
+    pub id: SessionId,
+    pub entries: Vec<Arc<TranscriptEntry>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -477,7 +495,7 @@ mod tests {
             handle.model_info().await.unwrap().reasoning_effort,
             Some("vendor-depth-42".to_owned())
         );
-        let new_id = handle.new_session().await.unwrap();
+        let new_id = handle.new_session().await.unwrap().id;
         assert_ne!(new_id.to_string(), "");
         assert_eq!(handle.model_info().await.unwrap().reasoning_effort, None);
         running.shutdown().await.unwrap();
@@ -877,5 +895,113 @@ mod tests {
         })
         .await
         .expect("shutdown stalled");
+    }
+    #[tokio::test]
+    async fn activation_views_isolate_history_and_failed_switch_keeps_active_session() {
+        let backend = Arc::new(ScriptedBackend {
+            responses: Mutex::new(VecDeque::from([
+                InferenceResponse {
+                    output: vec![output(OutputEffect::Text("answer A".into()))],
+                    usage: Some(usage(2, 3)),
+                },
+                InferenceResponse {
+                    output: vec![output(OutputEffect::Text("answer B".into()))],
+                    usage: None,
+                },
+            ])),
+            seen_inputs: Mutex::new(Vec::new()),
+            input_tokens: 0,
+        });
+        let running = start(
+            KernelComponents {
+                backend: backend.clone(),
+                store: Box::new(MemorySessionStore::default()),
+                tools: ToolRegistry::with_builtins(&[]).unwrap(),
+                agent_loop: Arc::new(ReactLoop::new(2).unwrap()),
+                context: Arc::new(FullContext),
+            },
+            options(),
+        )
+        .unwrap();
+        let h = running.handle();
+        let a = h.active_session().await.unwrap();
+        h.run("question A").await.unwrap();
+        let b = h.new_session().await.unwrap();
+        assert!(b.entries.is_empty());
+        h.run("question B").await.unwrap();
+        let a_view = h.switch_session(a).await.unwrap();
+        assert_eq!(a_view.id, a);
+        assert_eq!(a_view.entries.len(), 2);
+        assert!(
+            matches!(&*a_view.entries[1], TranscriptEntry::ModelMessage { text } if text == "answer A")
+        );
+        assert_eq!(backend.seen_inputs.lock().unwrap()[1].len(), 1);
+        let missing = SessionId::new();
+        assert!(h.switch_session(missing).await.is_err());
+        assert_eq!(h.active_session().await.unwrap(), a);
+        assert!(h.delete_session(a).await.is_err());
+        // Inference failure retains accepted input, never fabricates model text.
+        assert!(h.run("unanswered").await.is_err());
+        let failed = h.switch_session(a).await.unwrap();
+        assert_eq!(failed.entries.len(), 3);
+        assert!(
+            matches!(&*failed.entries[2], TranscriptEntry::UserMessage { text } if text == "unanswered")
+        );
+        assert_eq!(a_view.entries.len(), 2);
+        let cleared = h.clear_session().await.unwrap();
+        assert_eq!(cleared.id, a);
+        assert!(cleared.entries.is_empty());
+        assert_eq!(
+            h.context_info().await.unwrap().usage,
+            UsageSummary::default()
+        );
+        let b_view = h.switch_session(b.id).await.unwrap();
+        assert_eq!(b_view.entries.len(), 2);
+        h.delete_session(a).await.unwrap();
+        assert!(h.switch_session(a).await.is_err());
+        assert_eq!(h.active_session().await.unwrap(), b.id);
+        assert_eq!(backend.seen_inputs.lock().unwrap().len(), 3);
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn switch_waits_for_run_and_captures_the_committed_transcript() {
+        let (running, backend, release) = streaming_kernel(false, true);
+        let h = running.handle();
+        let id = h.active_session().await.unwrap();
+        let run_handle = h.clone();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let run = tokio::spawn(async move {
+            run_handle
+                .run(RunRequest::with_events("stream", sender))
+                .await
+        });
+        event(&mut receiver).await;
+        event(&mut receiver).await;
+        event(&mut receiver).await;
+        let switch = h.switch_session(id);
+        tokio::pin!(switch);
+        tokio::select! {
+            biased;
+            _ = &mut switch => panic!("switch must wait for run"),
+            () = std::future::ready(()) => {},
+        }
+        drop(receiver);
+        release.notify_one();
+        let view = tokio::time::timeout(std::time::Duration::from_secs(3), switch)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(run.await.unwrap().is_ok());
+        assert_eq!(view.id, id);
+        assert!(view.entries.iter().any(|entry| matches!(
+            entry.as_ref(),
+            TranscriptEntry::ToolInvocation {
+                execution: crate::session::ToolExecution::Completed(_),
+                ..
+            }
+        )));
+        assert_eq!(backend.seen_inputs.lock().unwrap().len(), 2);
+        running.shutdown().await.unwrap();
     }
 }

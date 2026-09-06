@@ -1126,3 +1126,192 @@ api_key_env = "MINUET_CLI_TEST_KEY"
         assert_eq!(pty.master.get_termios().unwrap(), pty.initial_modes);
     }
 }
+
+#[test]
+fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
+    for fail in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("first-response.json"),
+            json!({"status":"completed","output":[
+                {"type":"message","content":[{"type":"output_text","text":"**before-tool**"}]},
+                {"type":"function_call","call_id":"call-stream","name":"stream","arguments":"{}"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("second-response.json"),
+            json!({"status":"completed","output":[{"type":"message","content":[
+                {"type":"output_text","text":"**replay-answer** with [link](https://example.com)\n\n中文"}
+            ]}]})
+            .to_string(),
+        )
+        .unwrap();
+        let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "terminal_fixture", "--nocapture"]);
+        command.env(FIXTURE_ENV, directory.path());
+        if fail {
+            command.env("MINUET_TERMINAL_TEST_FAIL", "1");
+        }
+        let mut pty = Pty::start_process(command, directory, Some(false), false);
+        pty.ready();
+        pty.send(b"/session info\r");
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains(": 0 items"),
+            "initial session identity",
+        );
+        let contents = pty.parser.screen().contents();
+        let id = contents
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("session ")
+                    .and_then(|rest| rest.split_once(':'))
+                    .map(|(id, _)| id.to_owned())
+            })
+            .unwrap();
+        pty.send(b"replay-question\r");
+        pty.wait_for(
+            |p| p.directory.path().join("waiting").exists(),
+            "tool waiting",
+        );
+        pty.release();
+        pty.wait_for(
+            |p| {
+                p.frame_complete()
+                    && p.parser.screen().contents().contains("Completed ·")
+                    && p.parser.screen().contents().contains("replay-answer")
+            },
+            "completed original run",
+        );
+        let executed = std::fs::metadata(pty.directory.path().join("executed"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let requests: Vec<_> = (0..2)
+            .map(|i| std::fs::read(pty.directory.path().join(format!("request-{i}.json"))).unwrap())
+            .collect();
+        let start = pty.raw.len();
+        pty.send(b"/session new\r");
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("started session"),
+            "new session clears view",
+        );
+        let cleared = pty.parser.screen().contents();
+        assert!(!cleared.contains("replay-answer"), "{cleared}");
+        assert!(!cleared.contains("replay-question"), "{cleared}");
+        // vt100 0.16 does not emulate ED3. Check the explicit purge request
+        // separately from the emulator's visible-screen replacement evidence.
+        assert!(pty.raw[start..].windows(4).any(|bytes| bytes == b"\x1b[3J"));
+        pty.send(format!("/session switch {id}\r").as_bytes());
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("switched to session"),
+            "replay selected session",
+        );
+        let replay = pty.parser.screen().contents();
+        for text in [
+            "replay-question",
+            "before-tool",
+            "Tool: stream({})",
+            "replay-answer",
+            "中文",
+        ] {
+            assert!(replay.contains(text), "missing {text}: {replay}");
+        }
+        assert!(!replay.contains("**"), "Markdown should render: {replay}");
+        assert!(
+            replay.contains(if fail {
+                "Failed · Result:"
+            } else {
+                "Completed · Result:"
+            }),
+            "{replay}"
+        );
+        if fail {
+            // The terminal may wrap inside the failure marker.
+            assert!(replay.contains("invalid arguments"), "{replay}");
+            assert!(replay.contains("er-stream"), "{replay}");
+        } else {
+            assert!(replay.contains("final-tool-result"), "{replay}");
+        }
+        assert!(replay.find("replay-question") < replay.find("before-tool"));
+        assert!(replay.find("before-tool") < replay.find("Tool: stream"));
+        assert!(replay.find("Tool: stream") < replay.find("replay-answer"));
+        assert!(
+            !replay.contains("row-49"),
+            "provisional tool fragments are not committed results"
+        );
+        assert_eq!(
+            std::fs::metadata(pty.directory.path().join("executed"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            executed
+        );
+        assert!(
+            pty.raw[start..]
+                .windows("https://example.com".len())
+                .any(|bytes| bytes == b"https://example.com")
+        );
+        for (i, request) in requests.iter().enumerate() {
+            assert_eq!(
+                &std::fs::read(pty.directory.path().join(format!("request-{i}.json"))).unwrap(),
+                request
+            );
+        }
+        pty.send(b"/session switch invalid-id\r");
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("invalid session ID"),
+            "invalid switch is visible",
+        );
+        assert!(pty.parser.screen().contents().contains("replay-answer"));
+        pty.send(b"/clear\r");
+        pty.wait_for(
+            |p| {
+                p.frame_complete()
+                    && p.parser
+                        .screen()
+                        .contents()
+                        .contains("cleared conversation history")
+            },
+            "clear resets view",
+        );
+        assert!(!pty.parser.screen().contents().contains("replay-answer"));
+        pty.send(b"/session info\r");
+        pty.wait_for(
+            |p| {
+                let contents = p.parser.screen().contents();
+                p.frame_complete()
+                    && contents.contains(": 0 items")
+                    && contents.contains("usage_total=")
+                    && contents.lines().any(|line| line.trim() == "0")
+            },
+            "clear resets context",
+        );
+        let start = pty.raw.len();
+        pty.send(format!("/session switch {id}\r").as_bytes());
+        pty.wait_for(
+            |p| {
+                p.frame_complete()
+                    && p.raw.len() > start
+                    && p.parser.screen().contents().contains("switched to session")
+            },
+            "cleared session remains empty after switching",
+        );
+        assert!(!pty.parser.screen().contents().contains("replay-question"));
+        pty.send(b"/session clear\r");
+        pty.wait_for(
+            |p| {
+                p.frame_complete()
+                    && p.parser
+                        .screen()
+                        .contents()
+                        .contains("cleared conversation history")
+            },
+            "session clear has same redraw",
+        );
+        pty.send(b"/exit\r");
+        pty.finish();
+    }
+}

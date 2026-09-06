@@ -5,7 +5,7 @@ mod session;
 mod tools;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, error::ErrorKind};
-use minuet::kernel::{KernelError, KernelHandle};
+use minuet::kernel::{KernelError, KernelHandle, SessionView};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Input {
@@ -25,6 +25,9 @@ pub enum Command {
     /// Exit Minuet through shutdown
     #[command(name = "/exit", visible_alias = "/quit")]
     Exit,
+    /// Clear the active session and its display
+    #[command(name = "/clear")]
+    Clear,
     /// Manage sessions
     #[command(name = "/session", subcommand)]
     Session(session::Command),
@@ -39,12 +42,18 @@ pub enum Command {
     Context(context::Command),
 }
 
+pub enum Output {
+    Notice(String),
+    Session { view: SessionView, notice: String },
+}
+
 impl Command {
-    pub async fn execute(self, kernel: &KernelHandle) -> Result<String, KernelError> {
+    pub async fn execute(self, kernel: &KernelHandle) -> Result<Output, KernelError> {
         match self {
-            Self::Model(command) => command.execute(kernel).await,
-            Self::Tools(command) => command.execute(kernel).await,
-            Self::Context(command) => command.execute(kernel).await,
+            Self::Model(command) => command.execute(kernel).await.map(Output::Notice),
+            Self::Tools(command) => command.execute(kernel).await.map(Output::Notice),
+            Self::Context(command) => command.execute(kernel).await.map(Output::Notice),
+            Self::Clear => session::Command::Clear.execute(kernel).await,
             Self::Session(command) => command.execute(kernel).await,
             Self::Exit | Self::Help => unreachable!("handled by the interaction/parser boundary"),
         }
@@ -159,6 +168,7 @@ mod tests {
             parse("/session clear"),
             Input::Command(Command::Session(session::Command::Clear))
         );
+        assert_eq!(parse("/clear"), Input::Command(Command::Clear));
         assert_eq!(
             parse("/model info"),
             Input::Command(Command::Model(model::Command::Info))

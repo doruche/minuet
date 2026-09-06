@@ -1,6 +1,6 @@
 use tokio::sync::{mpsc, oneshot};
 
-use super::{ContextInfo, KernelError, ModelInfo};
+use super::{ContextInfo, KernelError, ModelInfo, SessionView};
 use crate::{
     agent_loop::{RunEvent, RunOutcome},
     model::ReasoningEffort,
@@ -28,11 +28,11 @@ impl KernelHandle {
         self.request(request.into(), Command::Run).await
     }
 
-    pub async fn new_session(&self) -> Result<SessionId, KernelError> {
+    pub async fn new_session(&self) -> Result<SessionView, KernelError> {
         self.request((), Command::NewSession).await
     }
 
-    pub async fn clear_session(&self) -> Result<(), KernelError> {
+    pub async fn clear_session(&self) -> Result<SessionView, KernelError> {
         self.request((), Command::ClearSession).await
     }
     pub async fn active_session(&self) -> Result<SessionId, KernelError> {
@@ -41,7 +41,7 @@ impl KernelHandle {
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, KernelError> {
         self.request((), Command::ListSessions).await
     }
-    pub async fn switch_session(&self, id: SessionId) -> Result<SessionId, KernelError> {
+    pub async fn switch_session(&self, id: SessionId) -> Result<SessionView, KernelError> {
         self.request(id, Command::SwitchSession).await
     }
     pub async fn delete_session(&self, id: SessionId) -> Result<(), KernelError> {
@@ -138,11 +138,11 @@ pub(super) struct SetToolEnabled {
 // envelope owns reply transport; payloads carry no response channels.
 pub(super) enum Command {
     Run(Envelope<RunRequest, RunOutcome>),
-    NewSession(Envelope<(), SessionId>),
-    ClearSession(Envelope<(), ()>),
+    NewSession(Envelope<(), SessionView>),
+    ClearSession(Envelope<(), SessionView>),
     ActiveSession(Envelope<(), SessionId>),
     ListSessions(Envelope<(), Vec<SessionSummary>>),
-    SwitchSession(Envelope<SessionId, SessionId>),
+    SwitchSession(Envelope<SessionId, SessionView>),
     DeleteSession(Envelope<SessionId, ()>),
     ModelInfo(Envelope<(), ModelInfo>),
     SetReasoningEffort(Envelope<Option<ReasoningEffort>, ()>),

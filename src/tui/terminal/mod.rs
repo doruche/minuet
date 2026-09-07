@@ -235,12 +235,19 @@ impl Screen {
     /// Replace the current inline view with the selected session's semantic
     /// transcript. Replay only publishes stored text; it never invokes work.
     pub fn replay(&mut self, entries: &[Arc<TranscriptEntry>]) -> io::Result<()> {
+        self.clear_display()?;
+        self.publish_entries(entries)
+    }
+
+    /// Clear terminal publication only; session history remains owned by the
+    /// repository and a later session switch can replay it in full.
+    pub fn clear_display(&mut self) -> io::Result<()> {
         self.preview.clear();
         self.tail = OutputTail::default();
         let area = self.terminal.get_frame().area();
-        // Inline viewports normally preserve terminal scrollback. A session
-        // replacement must withdraw that publication too, otherwise old
-        // messages remain visible above the new transcript. ED3 is supported
+        // Inline viewports normally preserve terminal scrollback. Explicit
+        // display clearing must withdraw that publication too, otherwise old
+        // messages remain visible above the fresh view. ED3 is supported
         // by terminals that implement native scrollback erasure; it is sent
         // explicitly alongside ED2 and a cursor home. Errors stay observable.
         execute!(
@@ -255,13 +262,17 @@ impl Screen {
                 viewport: Viewport::Inline(area.height),
             },
         )?;
-        self.publish_entries(entries)
+        Ok(())
     }
 
     /// Live messages retain document boundaries but calls appear only when
     /// actually executed or explicitly skipped, not as an advance pending list.
     pub fn publish_model_messages(&mut self, entries: &[Arc<TranscriptEntry>]) -> io::Result<()> {
         self.preview.clear();
+        // Withdraw the preview's height before publication; a full-height
+        // anchor would push the completed answer entirely into scrollback.
+        // Do this even when the committed turn contains only tool calls.
+        self.resize_viewport(2)?;
         for entry in entries {
             if let TranscriptEntry::ModelMessage { text } = entry.as_ref() {
                 self.markdown(text)?;
@@ -330,6 +341,23 @@ impl Screen {
             + u16::from(status.is_some()))
         .min(size.height)
         .max(1);
+        self.resize_viewport(height)?;
+        let shift_enter = cfg!(windows) || self.mode.keyboard_enhanced;
+        self.terminal.draw(|frame| {
+            render::draw(
+                frame,
+                &layout,
+                status,
+                &self.tail,
+                &preview,
+                self.colors,
+                shift_enter,
+            )
+        })?;
+        Ok(())
+    }
+
+    fn resize_viewport(&mut self, height: u16) -> io::Result<()> {
         if height != self.terminal.get_frame().area().height {
             // Ratatui 0.30 has no API to change an inline viewport's requested
             // height. Recreate only its display buffers at the same origin;
@@ -345,18 +373,6 @@ impl Screen {
                 },
             )?;
         }
-        let shift_enter = cfg!(windows) || self.mode.keyboard_enhanced;
-        self.terminal.draw(|frame| {
-            render::draw(
-                frame,
-                &layout,
-                status,
-                &self.tail,
-                &preview,
-                self.colors,
-                shift_enter,
-            )
-        })?;
         Ok(())
     }
 
@@ -373,6 +389,9 @@ impl Screen {
         // as literal text so it survives the next request and terminal exit.
         let draft = self.preview.take();
         if !draft.is_empty() {
+            // As with committed Markdown, release the preview's height before
+            // inserting the draft so the failure remains on the visible screen.
+            self.resize_viewport(2)?;
             self.end_line()?;
             self.styled_fragment(&draft, Tone::Text, CONTENT_PREFIX)?;
             self.end_line()?;

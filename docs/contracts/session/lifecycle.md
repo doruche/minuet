@@ -49,9 +49,16 @@ UUIDs. Startup creates a fresh session; no previous session is resumed.
 Successful session creation and clear return an empty presentation view.
 Successful switching returns the selected session's transcript from the same
 serialized kernel command that activates it. A failed switch preserves the
-active session and does not replace the frontend view. TUI creation, switching,
-and clearing replace the visible terminal and request native scrollback purge;
-switch replay renders stored semantics without executing model or tool work.
+active session and does not replace the frontend view. TUI session creation,
+switching, and `/session clear` replace the visible terminal and request native
+scrollback purge; switch replay renders stored semantics without executing model
+or tool work.
+
+`/clear` only clears the TUI display and requests native scrollback purge. It
+preserves provider context, semantic transcript, usage, session identity, and
+configuration. Switching to the session again replays its complete transcript.
+Native scrollback purge depends on terminal support and may also erase output
+from before Minuet started.
 
 Model/provider, loop, and context strategy are startup-fixed. Session-owned
 runtime policy currently includes reasoning effort and enabled tool names.

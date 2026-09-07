@@ -382,7 +382,7 @@ impl Pty {
 fn pty_paces_model_preview_before_commit_and_flushes_at_success_or_failure() {
     for fail in [false, true] {
         let directory = tempfile::tempdir().unwrap();
-        let text = format!("livepreview-{}\nreceived-tail", "字".repeat(400));
+        let text = format!("livepreview-{}\nreceived-tail\nend", "字".repeat(1000));
         let response = json!({"status":"completed", "output":[{"type":"message", "content":[{"type":"output_text", "text":text}]}]});
         std::fs::write(
             directory.path().join("first-response.json"),
@@ -410,6 +410,17 @@ fn pty_paces_model_preview_before_commit_and_flushes_at_success_or_failure() {
             "preview advances without another upstream write",
         );
         assert!(!pty.parser.screen().contents().contains("received-tail"));
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("received-tail"),
+            "preview fills the available terminal height before completion",
+        );
+        let preview = pty.parser.screen().contents();
+        assert!(
+            preview.lines().filter(|line| line.contains('字')).count() > 6,
+            "{preview}"
+        );
+        assert!(!preview.contains("livepreview-"), "{preview}");
+        assert!(preview.contains("Waiting for model"), "{preview}");
         std::fs::remove_file(pty.directory.path().join("hold-completion-0")).unwrap();
         pty.wait_for(
             |p| {
@@ -1160,7 +1171,7 @@ api_key_env = "MINUET_CLI_TEST_KEY"
 }
 
 #[test]
-fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
+fn pty_session_replay_distinguishes_display_clear_from_session_clear() {
     for fail in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1298,7 +1309,28 @@ fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
             "invalid switch is visible",
         );
         assert!(pty.parser.screen().contents().contains("replay-answer"));
+        let start = pty.raw.len();
         pty.send(b"/clear\r");
+        pty.wait_for(
+            |p| {
+                p.frame_complete()
+                    && p.parser
+                        .screen()
+                        .contents()
+                        .contains("Cleared display; session context preserved.")
+            },
+            "clear resets view",
+        );
+        assert!(!pty.parser.screen().contents().contains("replay-answer"));
+        assert!(pty.raw[start..].windows(4).any(|bytes| bytes == b"\x1b[3J"));
+        pty.send(format!("/session switch {id}\r").as_bytes());
+        pty.wait_for(
+            |p| p.frame_complete() && p.parser.screen().contents().contains("switched to session"),
+            "display clear preserves the session transcript",
+        );
+        assert!(pty.parser.screen().contents().contains("replay-question"));
+        assert!(pty.parser.screen().contents().contains("replay-answer"));
+        pty.send(b"/session clear\r");
         pty.wait_for(
             |p| {
                 p.frame_complete()
@@ -1307,7 +1339,7 @@ fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
                         .contents()
                         .contains("cleared conversation history")
             },
-            "clear resets view",
+            "session clear resets view and context",
         );
         assert!(!pty.parser.screen().contents().contains("replay-answer"));
         pty.send(b"/session info\r");
@@ -1319,7 +1351,7 @@ fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
                     && contents.contains("usage_total=")
                     && contents.lines().any(|line| line.trim() == "0")
             },
-            "clear resets context",
+            "session clear resets context",
         );
         let start = pty.raw.len();
         pty.send(format!("/session switch {id}\r").as_bytes());
@@ -1332,17 +1364,6 @@ fn pty_session_replay_replaces_view_and_clear_removes_both_histories() {
             "cleared session remains empty after switching",
         );
         assert!(!pty.parser.screen().contents().contains("replay-question"));
-        pty.send(b"/session clear\r");
-        pty.wait_for(
-            |p| {
-                p.frame_complete()
-                    && p.parser
-                        .screen()
-                        .contents()
-                        .contains("cleared conversation history")
-            },
-            "session clear has same redraw",
-        );
         pty.send(b"/exit\r");
         pty.finish();
     }

@@ -131,6 +131,10 @@ async fn interact(kernel: KernelHandle, screen: &mut Screen) -> io::Result<()> {
                                 )?;
                             },
                             command::Input::Command(command::Command::Exit) => return Ok(()),
+                            command::Input::Command(command::Command::Clear) => {
+                                screen.clear_display()?;
+                                screen.line("Cleared display; session context preserved.", Tone::Command)?;
+                            },
                             command::Input::Command(command) => {
                                 let kernel = kernel.clone();
                                 request = Some(Request::new(

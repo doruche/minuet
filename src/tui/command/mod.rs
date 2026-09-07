@@ -25,7 +25,7 @@ pub enum Command {
     /// Exit Minuet through shutdown
     #[command(name = "/exit", visible_alias = "/quit")]
     Exit,
-    /// Clear the active session and its display
+    /// Clear the display while preserving session context and history
     #[command(name = "/clear")]
     Clear,
     /// Manage sessions
@@ -53,9 +53,10 @@ impl Command {
             Self::Model(command) => command.execute(kernel).await.map(Output::Notice),
             Self::Tools(command) => command.execute(kernel).await.map(Output::Notice),
             Self::Context(command) => command.execute(kernel).await.map(Output::Notice),
-            Self::Clear => session::Command::Clear.execute(kernel).await,
             Self::Session(command) => command.execute(kernel).await,
-            Self::Exit | Self::Help => unreachable!("handled by the interaction/parser boundary"),
+            Self::Clear | Self::Exit | Self::Help => {
+                unreachable!("handled by the interaction/parser boundary")
+            },
         }
     }
 }

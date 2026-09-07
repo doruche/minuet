@@ -158,7 +158,7 @@ pub fn preview_lines(text: &str, width: u16, available_rows: u16) -> Vec<String>
     let mut tail = OutputTail::default();
     let mut rows = tail.push(text, width.saturating_sub(CONTENT_PREFIX));
     rows.push(tail.text);
-    let height = usize::from(available_rows.min(6));
+    let height = usize::from(available_rows);
     if rows.len() > height {
         rows.drain(..rows.len() - height);
     }
